@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 - 
 
-## [1.0.3] - 2025-09-18
+## [1.0.4] - 2025-09-22
 
 ### Features
 - **Updated BuiltinCommands List**: Added missing commands to the static fallback list for better compatibility
