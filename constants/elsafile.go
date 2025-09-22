@@ -12,7 +12,7 @@ const (
 // Built-in command constants
 const (
 	// BuiltinCommands contains all built-in Elsa commands that can conflict with Elsafile commands
-	BuiltinCommands = "init,run,list,exec,migrate,watch,help,version"
+	BuiltinCommands = "init,run,list,exec,migrate,watch,generate,gen,new,make,help,version"
 
 	// CommandSeparator is used to join multiple commands in a single command definition
 	CommandSeparator = " && "
@@ -125,7 +125,7 @@ deps:
 
 	// DefaultRunCommand is the default run command template
 	DefaultRunCommand = `# Run the application
-run:
+start:
 	go run .`
 
 	// DefaultFmtCommand is the default format command template
