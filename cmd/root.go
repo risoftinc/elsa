@@ -5,6 +5,7 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
+	envcmd "go.risoftinc.com/elsa/cmd/env"
 	"go.risoftinc.com/elsa/cmd/elsafile"
 	"go.risoftinc.com/elsa/cmd/generate"
 	"go.risoftinc.com/elsa/cmd/make"
@@ -58,6 +59,9 @@ func init() {
 
 	// Add make command
 	rootCmd.AddCommand(make.MakeCmd)
+
+	// Add env manager command
+	rootCmd.AddCommand(envcmd.EnvCmd)
 }
 
 // SetVersionInfo sets the version information for the application
