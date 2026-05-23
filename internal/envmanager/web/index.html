@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Elsa Env Manager</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <span class="logo">◆</span>
+        <div>
+          <h1>Elsa Env</h1>
+          <p class="tagline">Local environment manager</p>
+        </div>
+      </div>
+      <button type="button" class="nav-toggle" id="navToggle" aria-label="Menu">☰</button>
+    </header>
+
+    <nav class="nav" id="mainNav">
+      <button type="button" class="nav-item active" data-page="environments">Environments</button>
+      <button type="button" class="nav-item" data-page="variables">Variables</button>
+      <button type="button" class="nav-item" data-page="templates">Templates</button>
+    </nav>
+
+    <main class="main">
+      <!-- Environments -->
+      <section id="page-environments" class="page active">
+        <div class="page-header">
+          <h2>Environment groups</h2>
+          <p>Create custom groups like local, staging, or production.</p>
+        </div>
+        <form id="envForm" class="card form-inline">
+          <input type="text" id="envName" placeholder="Name (e.g. staging)" required>
+          <input type="number" id="envSort" placeholder="Order" value="0" min="0">
+          <button type="submit" class="btn primary">Add</button>
+        </form>
+        <div id="envList" class="list"></div>
+      </section>
+
+      <!-- Variables -->
+      <section id="page-variables" class="page">
+        <div class="page-header">
+          <h2>Variables</h2>
+          <p>Compare values across environments. Edit per row; add new keys in the table footer.</p>
+        </div>
+        <div class="var-toolbar card">
+          <input type="search" id="varSearch" class="var-search" placeholder="Search by key name…" autocomplete="off">
+          <div class="env-columns-wrap">
+            <button type="button" id="envColumnsBtn" class="btn env-columns-btn" aria-haspopup="listbox" aria-expanded="false">
+              <span class="env-columns-label">Columns</span>
+              <span id="envColumnsSummary" class="env-columns-summary">—</span>
+              <span class="chev" aria-hidden="true">▾</span>
+            </button>
+            <div id="envColumnsPanel" class="env-columns-panel" hidden>
+              <div id="varEnvPicker" class="env-picker-list"></div>
+              <div class="env-panel-footer">
+                <span class="env-panel-hint">Max 5 columns</span>
+                <button type="button" class="btn small" id="envSelectAll">Select max</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="varTableWrap" class="var-table-wrap"></div>
+        <div id="varPagination" class="var-pagination"></div>
+      </section>
+
+      <!-- Templates -->
+      <section id="page-templates" class="page">
+        <div class="page-header">
+          <h2>Templates</h2>
+          <p>Use Go template syntax: <code>{{.DB_HOST}}</code> — keys match your variable names.</p>
+        </div>
+        <button type="button" class="btn primary tpl-new-btn" id="btnNewTemplate">+ New template</button>
+        <div id="templateList" class="list template-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Template modal -->
+  <dialog id="tplModal" class="modal">
+    <form method="dialog" id="tplForm">
+      <div class="modal-header">
+        <h3 id="tplModalTitle">Template</h3>
+        <button type="button" class="btn icon" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <label>Name
+          <input type="text" id="tplName" required placeholder="e.g. dotenv-default" autocomplete="off">
+          <span class="field-hint">Must be unique (case-insensitive)</span>
+        </label>
+        <label>Body
+          <textarea id="tplBody" rows="12" required placeholder="DB_HOST={{.DB_HOST}}&#10;DB_USER={{.DB_USER}}"></textarea>
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Export modal -->
+  <dialog id="exportModal" class="modal">
+    <div class="modal-header">
+      <h3>Export</h3>
+      <button type="button" class="btn icon" data-close-export>✕</button>
+    </div>
+    <div class="modal-body">
+      <label>Environment
+        <select id="exportEnv"></select>
+      </label>
+      <label>Filename
+        <input type="text" id="exportFilename" placeholder=".env">
+      </label>
+      <label class="preview-label">Preview</label>
+      <pre id="exportPreview" class="preview"></pre>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn" id="btnCopyExport">Copy</button>
+      <button type="button" class="btn" id="btnDownloadExport">Download</button>
+      <button type="button" class="btn primary" id="btnRefreshExport">Generate</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -38,6 +38,7 @@ Thumbs.db
 /docs/
 /my-project/
 /elsa/
+/myapp/
 elsa-*
 coverage.out
 

@@ -4,7 +4,7 @@
 [![Version](https://img.shields.io/badge/Version-1.0.0-green.svg)](https://github.com/risoftinc/elsa)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Elsa** is a powerful developer productivity toolkit for Go that provides database migration management, file watching, custom command definitions, code generation, and project automation capabilities.
+**Elsa** is a powerful developer productivity toolkit for Go that provides database migration management, local environment variable management, file watching, custom command definitions, code generation, and project automation capabilities.
 
 ```
       ___           ___       ___           ___     
@@ -48,6 +48,13 @@
 - **Cross-Platform Cache**: Platform-specific cache locations (Windows/macOS/Linux)
 - **Git-Based Caching**: Cache paths follow git URL structure for better organization
 - **Module Management**: Automatic go.mod module name creation
+
+### 🔐 Env Manager (Local)
+- **Web UI**: Embedded in a single binary
+- **Environment Groups**: Custom groups (local, staging, production)
+- **Variable Comparison**: Side-by-side table across up to 5 environments
+- **Go Templates**: Export with `{{.KEY}}` syntax — copy or download `.env` files
+- **Private Storage**: SQLite in user config dir; localhost-only by default
 
 ### 🏗️ Make System
 - **Dynamic Template Types**: Generate files from configurable templates
@@ -143,7 +150,18 @@ elsa make repository health/health_repository
 elsa make list
 ```
 
-### 5. Custom Commands
+### 5. Env Manager
+```bash
+# Start local env manager (opens browser automatically)
+elsa env serve
+
+# Custom port, skip browser open
+elsa env serve --port 8080 --no-browser
+```
+
+See [Env Manager Guide](ENV_GUIDELINE.md) for environments, variables, templates, and export.
+
+### 6. Custom Commands
 ```bash
 # List available commands from Elsafile
 elsa list
@@ -243,6 +261,16 @@ Run: `elsa generate` to create `elsa_gen.go` with automatic dependency injection
 | `--output, -o` | Output directory (default: current) |
 | `--force, -f` | Overwrite existing directory |
 | `--refresh` | Force refresh template cache |
+
+### Env Manager Commands
+| Command | Description |
+|---------|-------------|
+| `elsa env serve` | Start local env manager web UI |
+| `elsa env reset` | Delete local database (requires 8-char confirmation code) |
+| `--host` | Host to bind (default: `127.0.0.1`) |
+| `--port` | HTTP port (default: `1999`) |
+| `--db` | Custom SQLite database path |
+| `--no-browser` | Do not open browser on start |
 
 ### Make Commands
 | Command | Description |
@@ -454,12 +482,17 @@ go build -o elsa ./cmd/elsa
   - Dependency definition
   - Advanced examples
   - Troubleshooting and best practices
+- **[Env Manager Guide](ENV_GUIDELINE.md)** - Local environment variable manager
+  - Environment groups, variables, and templates
+  - Comparison table, export, and Go template syntax
+  - Security, data storage, and REST API reference
 
 ### Command Reference
 - `elsa --help` - General help
 - `elsa make --help` - Make system help
 - `elsa migration --help` - Migration commands
 - `elsa watch --help` - File watching options
+- `elsa env --help` - Env manager commands
 
 ## 📄 License
 
