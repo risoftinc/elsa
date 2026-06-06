@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Elsa DB Designer</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="brand">
+        <span class="logo">◇</span>
+        <div>
+          <h1>Elsa DB Designer</h1>
+          <p class="tagline">Visual schema design — local only</p>
+        </div>
+      </div>
+      <button type="button" class="nav-toggle" id="navToggle" aria-label="Menu">☰</button>
+    </header>
+
+    <nav class="nav" id="mainNav">
+      <button type="button" class="nav-item active" data-page="projects">Projects</button>
+      <button type="button" class="nav-item" data-page="designer">Designer</button>
+    </nav>
+
+    <main class="main">
+      <section id="page-projects" class="page active">
+        <div class="page-header">
+          <h2>Projects</h2>
+          <p id="projectsTagline" class="page-tagline"></p>
+        </div>
+        <form id="projectForm" class="card form-inline">
+          <input type="text" id="projectName" placeholder="Project name" required>
+          <input type="text" id="projectDesc" placeholder="Description (optional)" class="project-desc-input">
+          <button type="submit" class="btn primary">Create project</button>
+        </form>
+        <div id="projectList" class="list"></div>
+      </section>
+
+      <section id="page-designer" class="page">
+        <div class="designer-toolbar card">
+          <span id="designerProjectName" class="designer-title">No project selected</span>
+          <div class="designer-actions">
+            <button type="button" class="btn small primary" id="btnAddTable" disabled>+ Table</button>
+            <button type="button" class="btn small" id="btnAutoLayout" disabled>Auto layout</button>
+            <button type="button" class="btn small" id="btnToggleSql" disabled>Hide SQL</button>
+            <button type="button" class="btn small" id="btnCopySQL" disabled>Copy</button>
+            <button type="button" class="btn small" id="btnDownloadSQL" disabled>Download</button>
+            <button type="button" class="btn small" id="btnExportDiagram" disabled>Export diagram</button>
+            <select id="exportImageStyle" class="toolbar-select" disabled title="Diagram style">
+              <option value="dark">Dark</option>
+              <option value="minimal">Minimal (print)</option>
+            </select>
+            <select id="exportImageFormat" class="toolbar-select" disabled title="Diagram format">
+              <option value="png">PNG</option>
+              <option value="svg">SVG</option>
+            </select>
+            <button type="button" class="btn small" id="btnReloadSchema" disabled>Reload</button>
+            <select id="exportDialect" class="toolbar-select" disabled title="SQL export dialect">
+              <option value="mysql">MySQL</option>
+              <option value="postgres">PostgreSQL</option>
+              <option value="sqlite">SQLite</option>
+            </select>
+            <span id="sqlSyncStatus" class="sync-status" hidden></span>
+          </div>
+        </div>
+        <p id="designerHint" class="designer-hint"></p>
+
+        <div class="designer-split" id="designerSplit">
+          <div class="sql-panel card" id="sqlPanel">
+            <div class="sql-panel-head">
+              <span>SQL</span>
+              <span id="sqlPanelStatus" class="sql-panel-status"></span>
+            </div>
+            <textarea id="sqlEditor" class="sql-editor" spellcheck="false" placeholder="-- SQL updates live with the diagram&#10;-- Edit here to update the canvas"></textarea>
+          </div>
+          <div class="canvas-area">
+            <div class="canvas-scroll" id="canvasScroll">
+              <svg id="relationSvg" class="relation-svg"></svg>
+              <div id="canvas" class="canvas"></div>
+              <div class="canvas-empty" id="canvasEmpty">Select or create a project to start designing.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="projectModal" class="modal">
+    <div class="modal-header">
+      <h3 id="projectModalTitle">Edit project</h3>
+      <button type="button" class="btn icon" data-close>✕</button>
+    </div>
+    <div class="modal-body">
+      <label>Name <input type="text" id="editProjectName" required></label>
+      <label>Description <textarea id="editProjectDesc" rows="3" placeholder="Optional notes about this design"></textarea></label>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" class="btn primary" id="btnSaveProject">Save</button>
+    </div>
+  </dialog>
+
+  <dialog id="tableModal" class="modal modal-wide">
+    <div class="modal-header">
+      <h3 id="tableModalTitle">Table</h3>
+      <button type="button" class="btn icon" data-close>✕</button>
+    </div>
+    <div class="modal-body">
+      <label>Table name <input type="text" id="tableNameInput"></label>
+      <div class="col-toolbar">
+        <span>Columns</span>
+        <button type="button" class="btn small primary" id="btnAddColumn">+ Column</button>
+      </div>
+      <div id="columnEditor" class="col-editor-wrap"></div>
+      <div class="col-toolbar idx-toolbar">
+        <span>Indexes</span>
+        <button type="button" class="btn small primary" id="btnAddIndex">+ Index</button>
+      </div>
+      <div id="indexEditor" class="idx-editor-wrap"></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn danger" id="btnDeleteTable">Delete table</button>
+      <button type="button" class="btn primary" id="btnSaveTable">Save</button>
+    </div>
+  </dialog>
+
+  <dialog id="exportPreviewModal" class="modal modal-wide export-preview-modal">
+    <div class="modal-header">
+      <h3>Export preview</h3>
+      <button type="button" class="btn icon" data-close-export-preview>✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="exportPreviewMeta" class="export-preview-meta"></p>
+      <div class="export-preview-frame">
+        <div id="exportPreviewContent" class="export-preview-content"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn" data-close-export-preview>Cancel</button>
+      <button type="button" class="btn primary" id="btnConfirmExportDiagram">Download</button>
+    </div>
+  </dialog>
+
+  <dialog id="relationModal" class="modal">
+    <div class="modal-header">
+      <h3 id="relationModalTitle">Foreign key</h3>
+      <button type="button" class="btn icon" data-close-rel>✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="relationModalSummary" class="relation-summary"></p>
+      <label>Constraint name
+        <input type="text" id="relName" placeholder="fk_orders_user_id" spellcheck="false" autocomplete="off">
+      </label>
+      <label>ON DELETE
+        <select id="relOnDelete">
+          <option value="RESTRICT">RESTRICT</option>
+          <option value="CASCADE">CASCADE</option>
+          <option value="SET NULL">SET NULL</option>
+          <option value="NO ACTION">NO ACTION</option>
+          <option value="SET DEFAULT">SET DEFAULT</option>
+        </select>
+      </label>
+      <label>ON UPDATE
+        <select id="relOnUpdate">
+          <option value="RESTRICT">RESTRICT</option>
+          <option value="CASCADE">CASCADE</option>
+          <option value="SET NULL">SET NULL</option>
+          <option value="NO ACTION">NO ACTION</option>
+          <option value="SET DEFAULT">SET DEFAULT</option>
+        </select>
+      </label>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn danger" id="btnDeleteRelation" hidden>Delete relation</button>
+      <button type="button" class="btn primary" id="btnSaveRelation">Save</button>
+    </div>
+  </dialog>
+
+  <dialog id="enumModal" class="modal modal-wide">
+    <div class="modal-header">
+      <h3 id="enumModalTitle">ENUM values</h3>
+      <button type="button" class="btn icon" data-close>✕</button>
+    </div>
+    <div class="modal-body">
+      <p id="enumModalSubtitle" class="enum-modal-sub"></p>
+      <div id="enumModalList" class="enum-modal-list"></div>
+      <button type="button" class="btn small" id="btnEnumAddRow">+ Add value</button>
+      <label class="enum-bulk-label">Paste values (one per line or comma-separated)
+        <textarea id="enumBulkPaste" rows="5" spellcheck="false" placeholder="cash&#10;transfer&#10;credit_card&#10;ewallet"></textarea>
+      </label>
+      <button type="button" class="btn small" id="btnEnumApplyBulk">Replace with pasted values</button>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" class="btn primary" id="btnSaveEnum">Save</button>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

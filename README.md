@@ -49,6 +49,15 @@
 - **Git-Based Caching**: Cache paths follow git URL structure for better organization
 - **Module Management**: Automatic go.mod module name creation
 
+### 🗄️ DB Designer (Local)
+- **Drag-and-drop canvas**: Design tables visually with PK/FK badges, indexes, and data types
+- **Projects**: Separate workspaces per schema (MySQL, PostgreSQL, SQLite)
+- **Relations**: FK lines with editable constraint name and ON DELETE / ON UPDATE actions
+- **Indexes**: Composite and unique indexes per table, included in SQL import/export
+- **Bidirectional SQL**: Live SQL panel; paste or edit SQL to update the diagram
+- **Diagram export**: Preview then download PNG/SVG (dark or print-friendly layout)
+- **Embedded UI**: Same dark theme as Env Manager, single binary
+
 ### 🔐 Env Manager (Local)
 - **Web UI**: Embedded in a single binary
 - **Environment Groups**: Custom groups (local, staging, production)
@@ -150,7 +159,14 @@ elsa make repository health/health_repository
 elsa make list
 ```
 
-### 5. Env Manager
+### 5. DB Designer
+```bash
+elsa dbdesign serve
+```
+
+See [DB Designer Guide](DBDESIGN_GUIDELINE.md).
+
+### 6. Env Manager
 ```bash
 # Start local env manager (opens browser automatically)
 elsa env serve
@@ -161,7 +177,7 @@ elsa env serve --port 8080 --no-browser
 
 See [Env Manager Guide](ENV_GUIDELINE.md) for environments, variables, templates, and export.
 
-### 6. Custom Commands
+### 7. Custom Commands
 ```bash
 # List available commands from Elsafile
 elsa list
@@ -261,6 +277,12 @@ Run: `elsa generate` to create `elsa_gen.go` with automatic dependency injection
 | `--output, -o` | Output directory (default: current) |
 | `--force, -f` | Overwrite existing directory |
 | `--refresh` | Force refresh template cache |
+
+### DB Designer Commands
+| Command | Description |
+|---------|-------------|
+| `elsa dbdesign serve` | Start visual schema designer web UI |
+| `--host`, `--port`, `--db`, `--no-browser` | Same pattern as env manager (default port `1998`) |
 
 ### Env Manager Commands
 | Command | Description |
@@ -482,6 +504,7 @@ go build -o elsa ./cmd/elsa
   - Dependency definition
   - Advanced examples
   - Troubleshooting and best practices
+- **[DB Designer Guide](DBDESIGN_GUIDELINE.md)** - Visual schema designer: tables, indexes, FK constraints, SQL sync, diagram export
 - **[Env Manager Guide](ENV_GUIDELINE.md)** - Local environment variable manager
   - Environment groups, variables, and templates
   - Comparison table, export, and Go template syntax

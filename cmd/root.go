@@ -5,8 +5,9 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
-	envcmd "go.risoftinc.com/elsa/cmd/env"
+	dbdesigncmd "go.risoftinc.com/elsa/cmd/dbdesign"
 	"go.risoftinc.com/elsa/cmd/elsafile"
+	envcmd "go.risoftinc.com/elsa/cmd/env"
 	"go.risoftinc.com/elsa/cmd/generate"
 	"go.risoftinc.com/elsa/cmd/make"
 	"go.risoftinc.com/elsa/cmd/migrate"
@@ -62,6 +63,9 @@ func init() {
 
 	// Add env manager command
 	rootCmd.AddCommand(envcmd.EnvCmd)
+
+	// Add database designer command
+	rootCmd.AddCommand(dbdesigncmd.DBDesignCmd)
 }
 
 // SetVersionInfo sets the version information for the application

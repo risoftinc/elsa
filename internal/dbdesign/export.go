@@ -1,0 +1,232 @@
+package dbdesign
+
+import (
+	"fmt"
+	"strings"
+)
+
+// ExportSQL generates CREATE TABLE statements for the project schema
+func ExportSQL(schema *Schema, dialect string) (string, error) {
+	if schema == nil {
+		return "", fmt.Errorf("schema is nil")
+	}
+	dialect = normalizeDialect(dialect)
+	if dialect == "" {
+		dialect = schema.Project.Dialect
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("-- Elsa DB Designer export\n-- Project: %s\n-- Dialect: %s\n\n", schema.Project.Name, dialect))
+
+	for _, tbl := range schema.Tables {
+		b.WriteString(buildCreateTable(tbl, dialect))
+		b.WriteByte('\n')
+	}
+
+	if dialect == DialectPostgres || dialect == DialectSQLite {
+		for _, tbl := range schema.Tables {
+			for _, idx := range tbl.Indexes {
+				line := buildIndexStatement(tbl, idx, dialect)
+				if line != "" {
+					b.WriteString(line)
+					b.WriteByte('\n')
+				}
+			}
+		}
+		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n\n") {
+			b.WriteByte('\n')
+		}
+	}
+
+	for _, rel := range schema.Relations {
+		line := buildForeignKey(schema, rel, dialect)
+		if line != "" {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func buildCreateTable(tbl TableDTO, dialect string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", quoteIdent(tbl.Name, dialect)))
+
+	var parts []string
+	for _, col := range tbl.Columns {
+		parts = append(parts, "  "+buildColumnDef(col, dialect))
+	}
+	if dialect == DialectMySQL {
+		for _, idx := range tbl.Indexes {
+			if line := buildIndexInline(tbl, idx, dialect); line != "" {
+				parts = append(parts, "  "+line)
+			}
+		}
+	}
+	if len(parts) > 0 {
+		b.WriteString(strings.Join(parts, ",\n"))
+	}
+
+	// inline FK for sqlite simplicity optional - we use ALTER for mysql/pg
+	b.WriteString("\n);\n")
+	return b.String()
+}
+
+func buildColumnDef(col Column, dialect string) string {
+	var b strings.Builder
+	b.WriteString(quoteIdent(col.Name, dialect))
+	b.WriteByte(' ')
+	b.WriteString(col.DataType)
+
+	if col.IsPrimaryKey {
+		switch dialect {
+		case DialectSQLite:
+			if strings.Contains(strings.ToUpper(col.DataType), "INT") {
+				b.WriteString(" PRIMARY KEY AUTOINCREMENT")
+			} else {
+				b.WriteString(" PRIMARY KEY")
+			}
+		case DialectPostgres:
+			if strings.Contains(strings.ToUpper(col.DataType), "SERIAL") {
+				b.WriteString(" PRIMARY KEY")
+			} else {
+				b.WriteString(" PRIMARY KEY")
+			}
+		default:
+			b.WriteString(" PRIMARY KEY")
+			if strings.Contains(strings.ToUpper(col.DataType), "INT") {
+				b.WriteString(" AUTO_INCREMENT")
+			}
+		}
+	}
+
+	if !col.IsNullable && !col.IsPrimaryKey {
+		b.WriteString(" NOT NULL")
+	} else if col.IsNullable && !col.IsPrimaryKey {
+		b.WriteString(" NULL")
+	}
+
+	if col.IsUnique && !col.IsPrimaryKey {
+		b.WriteString(" UNIQUE")
+	}
+
+	if col.DefaultValue != "" && !col.IsPrimaryKey {
+		b.WriteString(" DEFAULT ")
+		b.WriteString(col.DefaultValue)
+	}
+
+	return b.String()
+}
+
+func indexColumnNames(tbl TableDTO, idx IndexDTO, dialect string) string {
+	var names []string
+	for _, id := range idx.ColumnIDs {
+		for _, c := range tbl.Columns {
+			if c.ID == id {
+				names = append(names, quoteIdent(c.Name, dialect))
+				break
+			}
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+func buildIndexInline(tbl TableDTO, idx IndexDTO, dialect string) string {
+	cols := indexColumnNames(tbl, idx, dialect)
+	if cols == "" {
+		return ""
+	}
+	name := quoteIdent(idx.Name, dialect)
+	if idx.IsUnique {
+		return fmt.Sprintf("UNIQUE KEY %s (%s)", name, cols)
+	}
+	return fmt.Sprintf("KEY %s (%s)", name, cols)
+}
+
+func buildIndexStatement(tbl TableDTO, idx IndexDTO, dialect string) string {
+	cols := indexColumnNames(tbl, idx, dialect)
+	if cols == "" {
+		return ""
+	}
+	table := quoteIdent(tbl.Name, dialect)
+	name := quoteIdent(idx.Name, dialect)
+	if idx.IsUnique {
+		return fmt.Sprintf("CREATE UNIQUE INDEX %s ON %s (%s);\n", name, table, cols)
+	}
+	return fmt.Sprintf("CREATE INDEX %s ON %s (%s);\n", name, table, cols)
+}
+
+func buildForeignKey(schema *Schema, rel Relation, dialect string) string {
+	fromTable := tableName(schema, rel.FromTableID)
+	fromCol := columnName(schema, rel.FromColumnID)
+	toTable := tableName(schema, rel.ToTableID)
+	toCol := columnName(schema, rel.ToColumnID)
+	if fromTable == "" || toTable == "" {
+		return ""
+	}
+	constraint := relationConstraintName(rel.Name, fromTable, fromCol)
+	constraintSQL := quoteIdent(constraint, dialect)
+
+	switch dialect {
+	case DialectSQLite:
+		clause := formatFKActionClause(rel.OnDelete, rel.OnUpdate)
+		return fmt.Sprintf("-- FK: %s (%s) %s.%s -> %s.%s\n-- ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)%s;",
+			constraint, clause, fromTable, fromCol, toTable, toCol,
+			quoteIdent(fromTable, dialect), constraintSQL, quoteIdent(fromCol, dialect),
+			quoteIdent(toTable, dialect), quoteIdent(toCol, dialect), clause)
+	case DialectPostgres:
+		clause := formatFKActionClause(rel.OnDelete, rel.OnUpdate)
+		return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)%s;",
+			quoteIdent(fromTable, dialect), constraintSQL,
+			quoteIdent(fromCol, dialect), quoteIdent(toTable, dialect), quoteIdent(toCol, dialect), clause)
+	default:
+		clause := formatFKActionClause(rel.OnDelete, rel.OnUpdate)
+		return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s)%s;",
+			quoteIdent(fromTable, dialect), constraintSQL,
+			quoteIdent(fromCol, dialect), quoteIdent(toTable, dialect), quoteIdent(toCol, dialect), clause)
+	}
+}
+
+func tableName(schema *Schema, id uint) string {
+	for _, t := range schema.Tables {
+		if t.ID == id {
+			return t.Name
+		}
+	}
+	return ""
+}
+
+func columnName(schema *Schema, id uint) string {
+	for _, t := range schema.Tables {
+		for _, c := range t.Columns {
+			if c.ID == id {
+				return c.Name
+			}
+		}
+	}
+	return ""
+}
+
+func quoteIdent(name, dialect string) string {
+	switch dialect {
+	case DialectMySQL:
+		return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+	default:
+		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	}
+}
+
+// ExportFilename suggests a filename for the export
+func ExportFilename(projectName, dialect string) string {
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, strings.ToLower(strings.TrimSpace(projectName)))
+	if safe == "" {
+		safe = "schema"
+	}
+	return fmt.Sprintf("%s_%s.sql", safe, dialect)
+}
