@@ -126,3 +126,158 @@ func TestParseSQL_tokoSchema(t *testing.T) {
 		t.Fatalf("missing tables: %v", names)
 	}
 }
+
+func TestParseSQL_postgresEnumType(t *testing.T) {
+	sql := `
+CREATE TYPE "payments_method" AS ENUM ('cash', 'transfer', 'ewallet');
+
+CREATE TABLE payments (
+  id SERIAL PRIMARY KEY,
+  method "payments_method" NOT NULL DEFAULT 'cash'
+);
+`
+	tables, _, err := ParseSQL(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 || len(tables[0].Columns) != 2 {
+		t.Fatalf("unexpected tables: %+v", tables)
+	}
+	method := tables[0].Columns[1]
+	if method.Name != "method" {
+		t.Fatalf("column name: %q", method.Name)
+	}
+	want := "ENUM('cash','transfer','ewallet')"
+	if method.DataType != want {
+		t.Fatalf("datatype: %q want %q", method.DataType, want)
+	}
+}
+
+func TestFormatSQL_preservesPostgresEnum(t *testing.T) {
+	sql := `
+CREATE TYPE "payments_method" AS ENUM ('cash', 'transfer');
+
+CREATE TABLE payments (
+  id SERIAL PRIMARY KEY,
+  method "payments_method" DEFAULT 'cash'
+);
+`
+	formatted, err := FormatSQL(sql, DialectPostgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, _, err := ParseSQL(formatted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 || len(tables[0].Columns) != 2 {
+		t.Fatalf("unexpected tables: %+v", tables)
+	}
+	if tables[0].Columns[1].DataType != "ENUM('cash','transfer')" {
+		t.Fatalf("enum lost after format: %q", tables[0].Columns[1].DataType)
+	}
+	if !strings.Contains(formatted, `CREATE TYPE "payments_method" AS ENUM`) {
+		t.Fatalf("missing CREATE TYPE in formatted output:\n%s", formatted)
+	}
+}
+
+func TestParseSQL_duplicateColumnName(t *testing.T) {
+	sql := `CREATE TABLE users (
+  id INT PRIMARY KEY,
+  email VARCHAR(255),
+  email VARCHAR(100)
+);`
+	_, _, err := ParseSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for duplicate column name")
+	}
+	pe, ok := err.(*SQLParseError)
+	if !ok {
+		t.Fatalf("expected SQLParseError, got %T: %v", err, err)
+	}
+	if !strings.Contains(pe.Message, "duplicate column name") {
+		t.Fatalf("unexpected message: %v", pe.Message)
+	}
+}
+
+func TestParseSQL_normalizesPostgresInteger(t *testing.T) {
+	sql := `CREATE TABLE items (
+  id INTEGER PRIMARY KEY,
+  qty INTEGER NOT NULL
+);`
+	tables, _, err := ParseSQL(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tables[0].Columns[0].DataType != "INT" {
+		t.Fatalf("id type: %q want INT", tables[0].Columns[0].DataType)
+	}
+	if tables[0].Columns[1].DataType != "INT" {
+		t.Fatalf("qty type: %q want INT", tables[0].Columns[1].DataType)
+	}
+}
+
+func TestValidateSQL_duplicateColumnName(t *testing.T) {
+	sql := `CREATE TABLE t (
+  a INT,
+  a TEXT
+);`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected validation error for duplicate column")
+	}
+	if !strings.Contains(err.Error(), "duplicate column name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseSQL_sqliteDesignerFKComment(t *testing.T) {
+	sql := `CREATE TABLE roles (
+  id INTEGER PRIMARY KEY
+);
+
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  role_id INTEGER
+);
+
+-- FK: fk_users_role_id ( ON DELETE RESTRICT ON UPDATE RESTRICT) users.role_id -> roles.id
+-- ALTER TABLE "users" ADD CONSTRAINT "fk_users_role_id" FOREIGN KEY ("role_id") REFERENCES "roles"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;`
+
+	_, fks, err := ParseSQL(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fks) != 1 {
+		t.Fatalf("expected 1 FK from designer comment, got %d", len(fks))
+	}
+	if fks[0].FromTable != "users" || fks[0].FromColumn != "role_id" {
+		t.Fatalf("unexpected fk: %+v", fks[0])
+	}
+	if fks[0].ToTable != "roles" || fks[0].ToColumn != "id" {
+		t.Fatalf("unexpected fk target: %+v", fks[0])
+	}
+}
+
+func TestFormatSQL_sqlitePreservesDesignerFKComments(t *testing.T) {
+	sql := `CREATE TABLE roles (id INTEGER PRIMARY KEY);
+CREATE TABLE users (id INTEGER PRIMARY KEY, role_id INTEGER);
+
+-- FK: fk_users_role_id ( ON DELETE RESTRICT ON UPDATE RESTRICT) users.role_id -> roles.id
+-- ALTER TABLE "users" ADD CONSTRAINT "fk_users_role_id" FOREIGN KEY ("role_id") REFERENCES "roles"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;`
+
+	formatted, err := FormatSQL(sql, DialectSQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fks, err := ParseSQL(formatted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fks) != 1 {
+		t.Fatalf("expected FK preserved after sqlite format, got %d\n%s", len(fks), formatted)
+	}
+	if !strings.Contains(formatted, "-- FK: fk_users_role_id") {
+		t.Fatalf("expected designer FK comment in output:\n%s", formatted)
+	}
+}

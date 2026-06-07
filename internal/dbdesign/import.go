@@ -55,6 +55,8 @@ var (
 	reColNameType            = regexp.MustCompile(`(?i)(?:^|\s)[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s+(INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT|SERIAL|BIGSERIAL|SMALLSERIAL|VARCHAR|CHAR|TEXT|LONGTEXT|MEDIUMTEXT|TINYTEXT|BOOLEAN|BOOL|DATE|DATETIME|TIMESTAMP|TIME|DECIMAL|NUMERIC|FLOAT|DOUBLE|REAL|JSON|JSONB|BLOB|BYTEA|UUID|BIT|ENUM|SET)\b`)
 	reCreateTableKeyword     = regexp.MustCompile(`(?is)\bCREATE\s+TABLE\b`)
 	reCreateTableMissingName = regexp.MustCompile(`(?is)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?\s*\(`)
+	reCreatePgEnum           = regexp.MustCompile(`(?is)CREATE\s+TYPE\s+(?:IF\s+NOT\s+EXISTS\s+)?[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s+AS\s+ENUM\s*\(([^)]*)\)`)
+	reDesignerFKComment      = regexp.MustCompile(`(?i)--\s*FK:\s*(?P<name>\S+)\s*\((?P<actions>[^)]*)\)\s*(?P<fromtable>[a-zA-Z0-9_]+)\.(?P<fromcol>[a-zA-Z0-9_]+)\s*->\s*(?P<totable>[a-zA-Z0-9_]+)\.(?P<tocol>[a-zA-Z0-9_]+)`)
 )
 
 // SQLParseError describes a DDL parse failure with optional source location.
@@ -103,10 +105,12 @@ func (e *SQLParseError) locateIn(original string) {
 
 // ParseSQL extracts tables, columns, and foreign keys from SQL DDL
 func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
+	commentFKs := parseDesignerFKComments(sql)
 	sql = stripSQLComments(sql)
 	if err := validateCreateTableStatements(sql); err != nil {
 		return nil, nil, err
 	}
+	pgEnumTypes := parsePostgresEnumTypes(sql)
 	var extraFKs []parsedForeignKey
 
 	for _, m := range reAlterFK.FindAllStringSubmatch(sql, -1) {
@@ -154,7 +158,7 @@ func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
 		}
 		pt := parsedTable{Name: name}
 		var err error
-		pt.Columns, pt.FKs, pt.Indexes, err = parseColumnBlock(colBlock, name)
+		pt.Columns, pt.FKs, pt.Indexes, err = parseColumnBlock(colBlock, name, pgEnumTypes)
 		if err != nil {
 			return nil, extraFKs, err
 		}
@@ -165,7 +169,51 @@ func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
 		return nil, extraFKs, fmt.Errorf("no CREATE TABLE statements found")
 	}
 
+	extraFKs = appendUniqueForeignKeys(extraFKs, commentFKs...)
 	return tables, extraFKs, nil
+}
+
+func parseDesignerFKComments(sql string) []parsedForeignKey {
+	var out []parsedForeignKey
+	for _, m := range reDesignerFKComment.FindAllStringSubmatch(sql, -1) {
+		if len(m) < 7 {
+			continue
+		}
+		onDelete, onUpdate := ParseFKActions(m[2])
+		out = append(out, parsedForeignKey{
+			Name:       m[1],
+			FromTable:  m[3],
+			FromColumn: m[4],
+			ToTable:    m[5],
+			ToColumn:   m[6],
+			OnDelete:   onDelete,
+			OnUpdate:   onUpdate,
+		})
+	}
+	return out
+}
+
+func foreignKeyIdentity(fk parsedForeignKey) string {
+	return strings.ToLower(fk.FromTable + "." + fk.FromColumn + "->" + fk.ToTable + "." + fk.ToColumn)
+}
+
+func appendUniqueForeignKeys(list []parsedForeignKey, add ...parsedForeignKey) []parsedForeignKey {
+	if len(add) == 0 {
+		return list
+	}
+	seen := make(map[string]struct{}, len(list)+len(add))
+	for _, fk := range list {
+		seen[foreignKeyIdentity(fk)] = struct{}{}
+	}
+	for _, fk := range add {
+		key := foreignKeyIdentity(fk)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		list = append(list, fk)
+	}
+	return list
 }
 
 // ValidateSQL checks whether DDL can be parsed without applying it.
@@ -240,10 +288,92 @@ func extractParenBlock(s string) (string, bool) {
 	return "", false
 }
 
-func parseColumnBlock(block string, tableName string) ([]parsedColumn, []parsedForeignKey, []parsedIndex, error) {
+func parsePostgresEnumTypes(sql string) map[string][]string {
+	out := make(map[string][]string)
+	for _, m := range reCreatePgEnum.FindAllStringSubmatch(sql, -1) {
+		if len(m) < 3 {
+			continue
+		}
+		typeName := strings.ToLower(cleanIdent(m[1]))
+		values := parseEnumValuesFromDataType("ENUM(" + m[2] + ")")
+		if typeName == "" || len(values) == 0 {
+			continue
+		}
+		out[typeName] = values
+	}
+	return out
+}
+
+func resolveImportedColumnType(dataType, tableName, columnName string, pgEnums map[string][]string) string {
+	dt := strings.TrimSpace(dataType)
+	if len(parseEnumValuesFromDataType(dt)) > 0 {
+		return normalizeImportedDataType(dt)
+	}
+	keys := []string{
+		strings.ToLower(cleanIdent(dt)),
+		strings.ToLower(postgresEnumTypeName(tableName, columnName)),
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if values, ok := pgEnums[key]; ok {
+			return normalizeImportedDataType(formatEnumDataType(values))
+		}
+	}
+	return normalizeImportedDataType(dt)
+}
+
+// normalizeImportedDataType maps dialect-specific DDL types back to canvas canonical types.
+func normalizeImportedDataType(dataType string) string {
+	dt := strings.TrimSpace(dataType)
+	if dt == "" {
+		return "TEXT"
+	}
+	if len(parseEnumValuesFromDataType(dt)) > 0 {
+		return dt
+	}
+	upper := strings.ToUpper(strings.Join(strings.Fields(dt), " "))
+	if strings.HasPrefix(upper, "DOUBLE PRECISION") {
+		_, suffix := splitTypeBaseSuffix(dt)
+		return "DOUBLE" + suffix
+	}
+	base, suffix := splitTypeBaseSuffix(dt)
+	switch strings.ToUpper(strings.TrimSpace(base)) {
+	case "INTEGER":
+		return "INT" + suffix
+	case "BOOL":
+		return "BOOLEAN" + suffix
+	case "JSONB":
+		return "JSON" + suffix
+	case "BYTEA":
+		return "BLOB" + suffix
+	case "REAL":
+		return "FLOAT" + suffix
+	case "NUMERIC":
+		return "DECIMAL" + suffix
+	case "SERIAL":
+		return "INT" + suffix
+	case "BIGSERIAL":
+		return "BIGINT" + suffix
+	case "SMALLSERIAL":
+		return "SMALLINT" + suffix
+	case "MEDIUMINT":
+		return "INT" + suffix
+	case "LONGTEXT", "MEDIUMTEXT", "TINYTEXT":
+		return strings.ToUpper(base) + suffix
+	case "LONGBLOB", "MEDIUMBLOB", "TINYBLOB":
+		return "BLOB" + suffix
+	default:
+		return dt
+	}
+}
+
+func parseColumnBlock(block string, tableName string, pgEnums map[string][]string) ([]parsedColumn, []parsedForeignKey, []parsedIndex, error) {
 	var cols []parsedColumn
 	var fks []parsedForeignKey
 	var indexes []parsedIndex
+	seenCols := make(map[string]struct{})
 
 	parts := splitColumnDefs(block)
 	for _, part := range parts {
@@ -285,6 +415,16 @@ func parseColumnBlock(block string, tableName string) ([]parsedColumn, []parsedF
 
 		col := parseColumnLine(part)
 		if col.Name != "" {
+			col.DataType = resolveImportedColumnType(col.DataType, tableName, col.Name, pgEnums)
+			key := strings.ToLower(col.Name)
+			if _, dup := seenCols[key]; dup {
+				firstLine := strings.TrimSpace(strings.Split(part, "\n")[0])
+				return nil, nil, nil, &SQLParseError{
+					Message: fmt.Sprintf("duplicate column name %q in table %q", col.Name, tableName),
+					Snippet: firstLine,
+				}
+			}
+			seenCols[key] = struct{}{}
 			cols = append(cols, col)
 			continue
 		}

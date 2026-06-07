@@ -2741,6 +2741,42 @@
       .filter(Boolean);
   }
 
+  const TYPE_ALIASES = {
+    integer: 'int',
+    bool: 'boolean',
+    jsonb: 'json',
+    bytea: 'blob',
+    real: 'float',
+    numeric: 'decimal',
+    serial: 'int',
+    bigserial: 'bigint',
+    smallserial: 'smallint',
+  };
+
+  function resolveColumnTypeKind(raw) {
+    const text = String(raw || '').replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+
+    if (/^double\s+precision\b/i.test(text)) {
+      return 'double';
+    }
+
+    const withParen = text.match(/^([A-Za-z_]+)\s*\(\s*([^)]+)\s*\)$/i);
+    if (withParen) {
+      const base = TYPE_ALIASES[withParen[1].toLowerCase()] || withParen[1].toLowerCase();
+      const def = COLUMN_TYPES.find((t) => t.id === base || t.label.toLowerCase() === base);
+      if (def && !def.isCustom) return def.id;
+    }
+
+    const baseOnly = text.match(/^([A-Za-z_]+)/);
+    if (baseOnly) {
+      const base = TYPE_ALIASES[baseOnly[1].toLowerCase()] || baseOnly[1].toLowerCase();
+      const def = COLUMN_TYPES.find((t) => t.id === base || t.label.toLowerCase() === base);
+      if (def && !def.isCustom) return def.id;
+    }
+    return null;
+  }
+
   function parseColumnType(dataType) {
     const raw = String(dataType || '').replace(/\s+/g, ' ').trim();
     if (!raw) return { kind: 'varchar', length: '255', enumValues: [], custom: '' };
@@ -2754,28 +2790,24 @@
       return { kind: 'set', length: '', enumValues: parseEnumValuesList(setMatch[1]), custom: '' };
     }
 
-    const withParen = raw.match(/^([A-Za-z_]+)\s*\(\s*([^)]+)\s*\)$/i);
+    const withParen = raw.match(/^([A-Za-z_]+(?:\s+[A-Za-z_]+)?)\s*\(\s*([^)]+)\s*\)$/i);
     if (withParen) {
-      const base = withParen[1].toLowerCase();
       const len = withParen[2].trim();
-      const def = COLUMN_TYPES.find((t) => t.id === base || t.label.toLowerCase() === base);
-      if (def && !def.isCustom) {
-        return { kind: def.id, length: len, enumValues: [], custom: '' };
+      const kind = resolveColumnTypeKind(withParen[1]);
+      if (kind) {
+        return { kind, length: len, enumValues: [], custom: '' };
       }
     }
 
-    const baseOnly = raw.match(/^([A-Za-z_]+)/);
-    if (baseOnly) {
-      const base = baseOnly[1].toLowerCase();
-      const def = COLUMN_TYPES.find((t) => t.id === base || t.label.toLowerCase() === base);
-      if (def && !def.isCustom) {
-        return {
-          kind: def.id,
-          length: def.lengthDefault || '',
-          enumValues: [],
-          custom: '',
-        };
-      }
+    const kind = resolveColumnTypeKind(raw);
+    if (kind) {
+      const def = columnTypeDef(kind);
+      return {
+        kind,
+        length: def?.lengthDefault || '',
+        enumValues: [],
+        custom: '',
+      };
     }
 
     return { kind: 'custom', length: '', enumValues: [], custom: raw };
@@ -3835,6 +3867,20 @@
         method: 'PUT',
         body: JSON.stringify({ name: $('#tableNameInput').value.trim() }),
       });
+      const seenNames = new Set();
+      for (const row of rows) {
+        const colName = row.querySelector('.c-name')?.value.trim() || '';
+        if (!colName) {
+          toast('Column name is required', 'error');
+          return;
+        }
+        const key = colName.toLowerCase();
+        if (seenNames.has(key)) {
+          toast(`Duplicate column name "${colName}"`, 'error');
+          return;
+        }
+        seenNames.add(key);
+      }
       for (const [index, row] of rows.entries()) {
         const id = +row.dataset.colId;
         const defResult = validateAndFormatDefault(row);

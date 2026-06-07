@@ -155,6 +155,17 @@ func validateEnumDefault(dataType, defaultValue string, isSet bool) error {
 	return nil
 }
 
+func formatEnumDataType(values []string) string {
+	if len(values) == 0 {
+		return "ENUM()"
+	}
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = quoteSQLStringLiteral(v)
+	}
+	return "ENUM(" + strings.Join(parts, ",") + ")"
+}
+
 func parseEnumValuesFromDataType(dataType string) []string {
 	upper := strings.ToUpper(strings.TrimSpace(dataType))
 	if !strings.HasPrefix(upper, "ENUM(") && !strings.HasPrefix(upper, "SET(") {
