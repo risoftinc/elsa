@@ -57,6 +57,7 @@ var (
 	reCreateTableMissingName = regexp.MustCompile(`(?is)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?\s*\(`)
 	reCreatePgEnum           = regexp.MustCompile(`(?is)CREATE\s+TYPE\s+(?:IF\s+NOT\s+EXISTS\s+)?[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s+AS\s+ENUM\s*\(([^)]*)\)`)
 	reDesignerFKComment      = regexp.MustCompile(`(?i)--\s*FK:\s*(?P<name>\S+)\s*\((?P<actions>[^)]*)\)\s*(?P<fromtable>[a-zA-Z0-9_]+)\.(?P<fromcol>[a-zA-Z0-9_]+)\s*->\s*(?P<totable>[a-zA-Z0-9_]+)\.(?P<tocol>[a-zA-Z0-9_]+)`)
+	reCreateIndex            = regexp.MustCompile(`(?is)CREATE\s+(UNIQUE\s+)?INDEX\s+[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s+ON\s+[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s*\(([^)]+)\)`)
 	reTypeLengthDigits       = regexp.MustCompile(`^\d+$`)
 	reDecimalPrecision       = regexp.MustCompile(`^\d+\s*(,\s*\d+)?$`)
 	reGenericTypeParams      = regexp.MustCompile(`^[\d\s,]+$`)
@@ -172,8 +173,176 @@ func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
 		return nil, extraFKs, fmt.Errorf("no CREATE TABLE statements found")
 	}
 
+	if err := parseStandaloneIndexStatements(sql, tables); err != nil {
+		return nil, extraFKs, err
+	}
+
 	extraFKs = appendUniqueForeignKeys(extraFKs, commentFKs...)
+	if err := validateParsedSchema(tables, extraFKs); err != nil {
+		return nil, extraFKs, err
+	}
 	return tables, extraFKs, nil
+}
+
+func parseStandaloneIndexStatements(sql string, tables []parsedTable) *SQLParseError {
+	for _, m := range reCreateIndex.FindAllStringSubmatch(sql, -1) {
+		if len(m) < 5 {
+			continue
+		}
+		isUnique := strings.TrimSpace(m[1]) != ""
+		name := cleanIdent(m[2])
+		tableName := cleanIdent(m[3])
+		cols := splitIndexColumns(m[4])
+		if name == "" {
+			return &SQLParseError{
+				Message: "CREATE INDEX requires a name",
+				Snippet: strings.TrimSpace(m[0]),
+			}
+		}
+		if len(cols) == 0 {
+			return &SQLParseError{
+				Message: fmt.Sprintf("CREATE INDEX %q requires at least one column", name),
+				Snippet: strings.TrimSpace(m[0]),
+			}
+		}
+
+		tableIdx := -1
+		for i := range tables {
+			if strings.EqualFold(tables[i].Name, tableName) {
+				tableIdx = i
+				break
+			}
+		}
+		if tableIdx < 0 {
+			return &SQLParseError{
+				Message: fmt.Sprintf("CREATE INDEX %q references unknown table %q", name, tableName),
+				Snippet: "CREATE INDEX " + name,
+			}
+		}
+
+		pi := parsedIndex{Name: name, IsUnique: isUnique, Columns: cols}
+		tables[tableIdx].Indexes = appendUniqueParsedIndexes(tables[tableIdx].Indexes, pi)
+	}
+	return nil
+}
+
+func parsedIndexIdentity(idx parsedIndex) string {
+	parts := make([]string, len(idx.Columns))
+	for i, c := range idx.Columns {
+		parts[i] = strings.ToLower(c)
+	}
+	return strings.ToLower(idx.Name) + "|" + strings.Join(parts, ",") + "|" + fmt.Sprint(idx.IsUnique)
+}
+
+func appendUniqueParsedIndexes(list []parsedIndex, add parsedIndex) []parsedIndex {
+	key := parsedIndexIdentity(add)
+	for _, idx := range list {
+		if parsedIndexIdentity(idx) == key {
+			return list
+		}
+	}
+	return append(list, add)
+}
+
+func validateParsedSchema(tables []parsedTable, alterFKs []parsedForeignKey) *SQLParseError {
+	tableCols := make(map[string]map[string]struct{}, len(tables))
+	seenTables := make(map[string]string, len(tables))
+
+	for _, pt := range tables {
+		tableKey := strings.ToLower(pt.Name)
+		if first, dup := seenTables[tableKey]; dup {
+			return &SQLParseError{
+				Message: fmt.Sprintf("duplicate table name %q (also defined as %q)", pt.Name, first),
+				Snippet: "CREATE TABLE " + pt.Name,
+			}
+		}
+		seenTables[tableKey] = pt.Name
+
+		cols := make(map[string]struct{}, len(pt.Columns))
+		for _, c := range pt.Columns {
+			cols[strings.ToLower(c.Name)] = struct{}{}
+		}
+		tableCols[tableKey] = cols
+
+		pkCount := 0
+		var pkNames []string
+		for _, c := range pt.Columns {
+			if c.IsPrimaryKey {
+				pkCount++
+				pkNames = append(pkNames, c.Name)
+			}
+		}
+		if pkCount > 1 {
+			return &SQLParseError{
+				Message: fmt.Sprintf("multiple PRIMARY KEY columns in table %q (%s)", pt.Name, strings.Join(pkNames, ", ")),
+				Snippet: "CREATE TABLE " + pt.Name,
+			}
+		}
+
+		for _, fk := range pt.FKs {
+			if err := validateForeignKeyRef(pt.Name, fk, tableCols); err != nil {
+				return err
+			}
+		}
+
+		for _, idx := range pt.Indexes {
+			for _, colName := range idx.Columns {
+				if _, ok := cols[strings.ToLower(colName)]; !ok {
+					idxLabel := strings.TrimSpace(idx.Name)
+					if idxLabel == "" {
+						idxLabel = "unnamed"
+					}
+					return &SQLParseError{
+						Message: fmt.Sprintf("index %q references unknown column %q in table %q", idxLabel, colName, pt.Name),
+						Snippet: "CREATE TABLE " + pt.Name,
+					}
+				}
+			}
+		}
+	}
+
+	for _, fk := range alterFKs {
+		if err := validateForeignKeyRef(fk.FromTable, fk, tableCols); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateForeignKeyRef(fromTable string, fk parsedForeignKey, tableCols map[string]map[string]struct{}) *SQLParseError {
+	fromTable = strings.TrimSpace(fromTable)
+	toTable := strings.TrimSpace(fk.ToTable)
+	fromCol := strings.ToLower(cleanIdent(fk.FromColumn))
+	toCol := strings.ToLower(cleanIdent(fk.ToColumn))
+
+	fromCols, ok := tableCols[strings.ToLower(fromTable)]
+	if !ok {
+		return &SQLParseError{
+			Message: fmt.Sprintf("foreign key on table %q references unknown source table", fromTable),
+			Snippet: "FOREIGN KEY (" + fk.FromColumn + ")",
+		}
+	}
+	if _, ok := fromCols[fromCol]; !ok {
+		return &SQLParseError{
+			Message: fmt.Sprintf("foreign key column %q not found in table %q", fk.FromColumn, fromTable),
+			Snippet: "FOREIGN KEY (" + fk.FromColumn + ")",
+		}
+	}
+
+	toCols, ok := tableCols[strings.ToLower(toTable)]
+	if !ok {
+		return &SQLParseError{
+			Message: fmt.Sprintf("foreign key references unknown table %q", fk.ToTable),
+			Snippet: "REFERENCES " + fk.ToTable,
+		}
+	}
+	if _, ok := toCols[toCol]; !ok {
+		return &SQLParseError{
+			Message: fmt.Sprintf("foreign key references unknown column %q in table %q", fk.ToColumn, fk.ToTable),
+			Snippet: "REFERENCES " + fk.ToTable + "(" + fk.ToColumn + ")",
+		}
+	}
+	return nil
 }
 
 func parseDesignerFKComments(sql string) []parsedForeignKey {

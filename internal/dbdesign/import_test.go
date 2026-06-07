@@ -257,6 +257,163 @@ func TestValidateSQL_invalidDecimalPrecision(t *testing.T) {
 	}
 }
 
+func TestValidateSQL_duplicateTableName(t *testing.T) {
+	sql := `CREATE TABLE users (id INT PRIMARY KEY);
+CREATE TABLE users (name VARCHAR(100));`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for duplicate table name")
+	}
+	if !strings.Contains(err.Error(), "duplicate table name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateSQL_multiplePrimaryKey(t *testing.T) {
+	sql := `CREATE TABLE users (
+  id BIGINT PRIMARY KEY,
+  slug VARCHAR(50) PRIMARY KEY
+);`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for multiple PRIMARY KEY columns")
+	}
+	if !strings.Contains(err.Error(), "multiple PRIMARY KEY") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateSQL_fkUnknownTable(t *testing.T) {
+	sql := `CREATE TABLE orders (
+  id INT PRIMARY KEY,
+  customer_id INT,
+  FOREIGN KEY (customer_id) REFERENCES customers(id)
+);`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for FK to unknown table")
+	}
+	if !strings.Contains(err.Error(), "unknown table") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateSQL_fkUnknownColumn(t *testing.T) {
+	sql := `CREATE TABLE parents (id INT PRIMARY KEY);
+CREATE TABLE children (
+  id INT PRIMARY KEY,
+  parent_id INT,
+  FOREIGN KEY (parent_id) REFERENCES parents(nope)
+);`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for FK to unknown column")
+	}
+	if !strings.Contains(err.Error(), "unknown column") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateSQL_indexUnknownColumn(t *testing.T) {
+	sql := `CREATE TABLE users (
+  id INT PRIMARY KEY,
+  KEY idx_email (email)
+);`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for index on unknown column")
+	}
+	if !strings.Contains(err.Error(), "unknown column") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseSQL_createIndexStatement(t *testing.T) {
+	sql := `CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  email TEXT NOT NULL
+);
+
+CREATE INDEX idx_email ON users (email);
+CREATE UNIQUE INDEX idx_email_unique ON users (email);`
+
+	tables, _, err := ParseSQL(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("tables: %d", len(tables))
+	}
+	if len(tables[0].Indexes) != 2 {
+		t.Fatalf("indexes: %d want 2", len(tables[0].Indexes))
+	}
+	if tables[0].Indexes[0].Name != "idx_email" || tables[0].Indexes[0].IsUnique {
+		t.Fatalf("first index: %+v", tables[0].Indexes[0])
+	}
+	if tables[0].Indexes[1].Name != "idx_email_unique" || !tables[0].Indexes[1].IsUnique {
+		t.Fatalf("second index: %+v", tables[0].Indexes[1])
+	}
+}
+
+func TestValidateSQL_createIndexUnknownTable(t *testing.T) {
+	sql := `CREATE TABLE users (id INTEGER PRIMARY KEY);
+CREATE INDEX idx_email ON missing (email);`
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for CREATE INDEX on unknown table")
+	}
+	if !strings.Contains(err.Error(), "unknown table") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFormatSQL_sqlitePreservesCreateIndex(t *testing.T) {
+	sql := `CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  email TEXT NOT NULL
+);
+
+CREATE INDEX idx_email ON users (email);`
+
+	formatted, err := FormatSQL(sql, DialectSQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, _, err := ParseSQL(formatted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 || len(tables[0].Indexes) != 1 {
+		t.Fatalf("expected index preserved, got tables=%+v", tables)
+	}
+	if tables[0].Indexes[0].Name != "idx_email" {
+		t.Fatalf("index name: %q", tables[0].Indexes[0].Name)
+	}
+	if !strings.Contains(formatted, "CREATE INDEX") {
+		t.Fatalf("expected CREATE INDEX in formatted output:\n%s", formatted)
+	}
+}
+
+func TestFormatSQL_mysqlInlineIndexRoundTrip(t *testing.T) {
+	sql := `CREATE TABLE users (
+  id INT PRIMARY KEY,
+  email VARCHAR(255) NOT NULL,
+  KEY idx_email (email)
+);`
+
+	formatted, err := FormatSQL(sql, DialectMySQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, _, err := ParseSQL(formatted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 1 || len(tables[0].Indexes) != 1 {
+		t.Fatalf("expected inline index preserved, got %+v", tables[0].Indexes)
+	}
+}
+
 func TestParseSQL_sqliteDesignerFKComment(t *testing.T) {
 	sql := `CREATE TABLE roles (
   id INTEGER PRIMARY KEY

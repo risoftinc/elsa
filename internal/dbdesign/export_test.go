@@ -127,6 +127,10 @@ func TestFormatSQL(t *testing.T) {
 
 func TestFormatSQL_preservesComments(t *testing.T) {
 	sql := `-- inventory tables
+CREATE TABLE roles (
+  id int primary key
+);
+
 CREATE TABLE users (
   id int primary key, -- surrogate key
   email varchar(255) not null
@@ -153,7 +157,7 @@ func TestParseSQL_autoIncrementFlag(t *testing.T) {
 	sql := `
 CREATE TABLE users (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  slug VARCHAR(50) PRIMARY KEY
+  slug VARCHAR(50) NOT NULL UNIQUE
 );
 `
 	tables, _, err := ParseSQL(sql)
