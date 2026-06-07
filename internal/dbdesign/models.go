@@ -25,6 +25,7 @@ type Table struct {
 	Name      string    `json:"name" gorm:"not null"`
 	PosX      float64   `json:"pos_x"`
 	PosY      float64   `json:"pos_y"`
+	Width     float64   `json:"width"` // canvas width; 0 = auto from title
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

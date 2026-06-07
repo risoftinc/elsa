@@ -125,6 +125,20 @@ func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 			}
 			s.handleImport(w, r, projectID)
 			return
+		case "validate":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", 405)
+				return
+			}
+			s.handleValidateSQL(w, r)
+			return
+		case "format":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", 405)
+				return
+			}
+			s.handleFormatSQL(w, r)
+			return
 		case "tables":
 			if r.Method == http.MethodPost {
 				var req struct {
@@ -222,6 +236,55 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request, projectID 
 	writeJSON(w, 200, result)
 }
 
+func (s *Server) handleValidateSQL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SQL string `json:"sql"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	if err := ValidateSQL(req.SQL); err != nil {
+		if pe, ok := err.(*SQLParseError); ok {
+			writeJSON(w, 400, map[string]any{
+				"error":  pe.Message,
+				"line":   pe.Line,
+				"column": pe.Column,
+			})
+			return
+		}
+		writeError(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"valid": true})
+}
+
+func (s *Server) handleFormatSQL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SQL     string `json:"sql"`
+		Dialect string `json:"dialect"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	formatted, err := FormatSQL(req.SQL, req.Dialect)
+	if err != nil {
+		if pe, ok := err.(*SQLParseError); ok {
+			pe.locateIn(req.SQL)
+			writeJSON(w, 400, map[string]any{
+				"error":  pe.Message,
+				"line":   pe.Line,
+				"column": pe.Column,
+			})
+			return
+		}
+		writeError(w, 400, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"sql": formatted})
+}
+
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request, projectID uint) {
 	var req struct {
 		Dialect string `json:"dialect"`
@@ -301,15 +364,16 @@ func (s *Server) handleTableRoutes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
-			Name string   `json:"name"`
-			PosX *float64 `json:"pos_x"`
-			PosY *float64 `json:"pos_y"`
+			Name  string   `json:"name"`
+			PosX  *float64 `json:"pos_x"`
+			PosY  *float64 `json:"pos_y"`
+			Width *float64 `json:"width"`
 		}
 		if err := readJSON(r, &req); err != nil {
 			writeError(w, 400, err)
 			return
 		}
-		t, err := s.store.UpdateTable(uint(tableID), req.Name, req.PosX, req.PosY)
+		t, err := s.store.UpdateTable(uint(tableID), req.Name, req.PosX, req.PosY, req.Width)
 		if err != nil {
 			writeErr(w, err)
 			return

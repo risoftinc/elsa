@@ -48,15 +48,65 @@ type parsedTable struct {
 }
 
 var (
-	reCreateTable  = regexp.MustCompile("(?is)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?[`\"]?(?P<name>[a-zA-Z0-9_]+)[`\"]?\\s*\\(")
-	reAlterFK      = regexp.MustCompile("(?is)ALTER\\s+TABLE\\s+[`\"]?(?P<from>[a-zA-Z0-9_]+)[`\"]?\\s+ADD\\s+(?:CONSTRAINT\\s+[`\"]?(?P<cname>[a-zA-Z0-9_]+)[`\"]?\\s+)?FOREIGN\\s+KEY\\s*\\((?P<fc>[^)]+)\\)\\s*REFERENCES\\s+[`\"]?(?P<to>[a-zA-Z0-9_]+)[`\"]?\\s*\\((?P<tc>[^)]+)\\)")
-	reFKInline     = regexp.MustCompile("(?is)FOREIGN\\s+KEY\\s*\\((?P<fc>[^)]+)\\)\\s*REFERENCES\\s+[`\"]?(?P<to>[a-zA-Z0-9_]+)[`\"]?\\s*\\((?P<tc>[^)]+)\\)")
-	reFKConstraint = regexp.MustCompile("(?is)CONSTRAINT\\s+[`\"]?(?P<name>[a-zA-Z0-9_]+)[`\"]?\\s+FOREIGN\\s+KEY")
+	reCreateTable            = regexp.MustCompile("(?is)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?[`\"]?(?P<name>[a-zA-Z0-9_]+)[`\"]?\\s*\\(")
+	reAlterFK                = regexp.MustCompile("(?is)ALTER\\s+TABLE\\s+[`\"]?(?P<from>[a-zA-Z0-9_]+)[`\"]?\\s+ADD\\s+(?:CONSTRAINT\\s+[`\"]?(?P<cname>[a-zA-Z0-9_]+)[`\"]?\\s+)?FOREIGN\\s+KEY\\s*\\((?P<fc>[^)]+)\\)\\s*REFERENCES\\s+[`\"]?(?P<to>[a-zA-Z0-9_]+)[`\"]?\\s*\\((?P<tc>[^)]+)\\)")
+	reFKInline               = regexp.MustCompile("(?is)FOREIGN\\s+KEY\\s*\\((?P<fc>[^)]+)\\)\\s*REFERENCES\\s+[`\"]?(?P<to>[a-zA-Z0-9_]+)[`\"]?\\s*\\((?P<tc>[^)]+)\\)")
+	reFKConstraint           = regexp.MustCompile("(?is)CONSTRAINT\\s+[`\"]?(?P<name>[a-zA-Z0-9_]+)[`\"]?\\s+FOREIGN\\s+KEY")
+	reColNameType            = regexp.MustCompile(`(?i)(?:^|\s)[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s+(INT|INTEGER|BIGINT|SMALLINT|TINYINT|MEDIUMINT|SERIAL|BIGSERIAL|SMALLSERIAL|VARCHAR|CHAR|TEXT|LONGTEXT|MEDIUMTEXT|TINYTEXT|BOOLEAN|BOOL|DATE|DATETIME|TIMESTAMP|TIME|DECIMAL|NUMERIC|FLOAT|DOUBLE|REAL|JSON|JSONB|BLOB|BYTEA|UUID|BIT|ENUM|SET)\b`)
+	reCreateTableKeyword     = regexp.MustCompile(`(?is)\bCREATE\s+TABLE\b`)
+	reCreateTableMissingName = regexp.MustCompile(`(?is)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?\s*\(`)
 )
+
+// SQLParseError describes a DDL parse failure with optional source location.
+type SQLParseError struct {
+	Line    int
+	Column  int
+	Message string
+	Snippet string
+}
+
+func (e *SQLParseError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Line > 0 {
+		if e.Column > 0 {
+			return fmt.Sprintf("line %d, column %d: %s", e.Line, e.Column, e.Message)
+		}
+		return fmt.Sprintf("line %d: %s", e.Line, e.Message)
+	}
+	return e.Message
+}
+
+func (e *SQLParseError) locateIn(original string) {
+	if e == nil || e.Line > 0 || strings.TrimSpace(e.Snippet) == "" {
+		return
+	}
+	snippet := strings.TrimSpace(e.Snippet)
+	for _, needle := range []string{snippet, strings.TrimSpace(strings.Split(snippet, "\n")[0])} {
+		if needle == "" {
+			continue
+		}
+		idx := strings.Index(original, needle)
+		if idx < 0 {
+			continue
+		}
+		e.Line = 1 + strings.Count(original[:idx], "\n")
+		lastNL := strings.LastIndex(original[:idx], "\n")
+		e.Column = idx - lastNL
+		if e.Column <= 0 {
+			e.Column = 1
+		}
+		return
+	}
+}
 
 // ParseSQL extracts tables, columns, and foreign keys from SQL DDL
 func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
 	sql = stripSQLComments(sql)
+	if err := validateCreateTableStatements(sql); err != nil {
+		return nil, nil, err
+	}
 	var extraFKs []parsedForeignKey
 
 	for _, m := range reAlterFK.FindAllStringSubmatch(sql, -1) {
@@ -90,14 +140,24 @@ func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
 		// "(" inside a column type such as VARCHAR(150) or DECIMAL(15,2).
 		openParen := idx[1] - 1
 		if openParen < 0 || openParen >= len(sql) || sql[openParen] != '(' {
-			continue
+			return nil, extraFKs, &SQLParseError{
+				Message: fmt.Sprintf("invalid CREATE TABLE syntax for %q", name),
+				Snippet: sql[idx[0]:minInt(bodyEnd, idx[0]+120)],
+			}
 		}
 		colBlock, ok := extractParenBlock(sql[openParen:bodyEnd])
 		if !ok {
-			continue
+			return nil, extraFKs, &SQLParseError{
+				Message: fmt.Sprintf("unclosed column list in CREATE TABLE %q", name),
+				Snippet: sql[idx[0]:minInt(bodyEnd, idx[0]+120)],
+			}
 		}
 		pt := parsedTable{Name: name}
-		pt.Columns, pt.FKs, pt.Indexes = parseColumnBlock(colBlock)
+		var err error
+		pt.Columns, pt.FKs, pt.Indexes, err = parseColumnBlock(colBlock, name)
+		if err != nil {
+			return nil, extraFKs, err
+		}
 		tables = append(tables, pt)
 	}
 
@@ -106,6 +166,47 @@ func ParseSQL(sql string) ([]parsedTable, []parsedForeignKey, error) {
 	}
 
 	return tables, extraFKs, nil
+}
+
+// ValidateSQL checks whether DDL can be parsed without applying it.
+func ValidateSQL(sql string) error {
+	if strings.TrimSpace(sql) == "" {
+		return fmt.Errorf("sql is required")
+	}
+	_, _, err := ParseSQL(sql)
+	if err != nil {
+		if pe, ok := err.(*SQLParseError); ok {
+			pe.locateIn(sql)
+		}
+	}
+	return err
+}
+
+func validateCreateTableStatements(sql string) *SQLParseError {
+	for _, idx := range reCreateTableKeyword.FindAllStringIndex(sql, -1) {
+		rest := sql[idx[0]:]
+		firstLine := strings.TrimSpace(strings.Split(rest, "\n")[0])
+		if reCreateTableMissingName.MatchString(rest) {
+			return &SQLParseError{
+				Message: "CREATE TABLE requires a table name",
+				Snippet: firstLine,
+			}
+		}
+		if loc := reCreateTable.FindStringSubmatchIndex(rest); loc == nil || loc[0] != 0 {
+			return &SQLParseError{
+				Message: "invalid CREATE TABLE statement",
+				Snippet: firstLine,
+			}
+		}
+	}
+	return nil
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func stripSQLComments(sql string) string {
@@ -139,7 +240,7 @@ func extractParenBlock(s string) (string, bool) {
 	return "", false
 }
 
-func parseColumnBlock(block string) ([]parsedColumn, []parsedForeignKey, []parsedIndex) {
+func parseColumnBlock(block string, tableName string) ([]parsedColumn, []parsedForeignKey, []parsedIndex, error) {
 	var cols []parsedColumn
 	var fks []parsedForeignKey
 	var indexes []parsedIndex
@@ -174,12 +275,55 @@ func parseColumnBlock(block string) ([]parsedColumn, []parsedForeignKey, []parse
 			continue
 		}
 
+		if countColumnDefinitions(part) > 1 {
+			firstLine := strings.TrimSpace(strings.Split(part, "\n")[0])
+			return nil, nil, nil, &SQLParseError{
+				Message: fmt.Sprintf("missing comma between column definitions in table %q", tableName),
+				Snippet: firstLine,
+			}
+		}
+
 		col := parseColumnLine(part)
 		if col.Name != "" {
 			cols = append(cols, col)
+			continue
+		}
+
+		return nil, nil, nil, &SQLParseError{
+			Message: fmt.Sprintf("unrecognized column definition in table %q", tableName),
+			Snippet: part,
 		}
 	}
-	return cols, fks, indexes
+	return cols, fks, indexes, nil
+}
+
+func countColumnDefinitions(part string) int {
+	flat := flattenParenContent(part)
+	return len(reColNameType.FindAllStringIndex(flat, -1))
+}
+
+func flattenParenContent(s string) string {
+	var b strings.Builder
+	depth := 0
+	for _, ch := range s {
+		switch ch {
+		case '(':
+			depth++
+			if depth == 1 {
+				b.WriteByte(' ')
+				continue
+			}
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == 0 {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
 }
 
 func extractFKConstraintName(part string) string {

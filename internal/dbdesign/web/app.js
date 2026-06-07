@@ -8,7 +8,10 @@
     enumEditRow: null,
     lastExport: null,
     drag: null,
+    resize: null,
     linkDrag: null,
+    pan: null,
+    canvasZoom: 1,
     pendingRelation: null,
     editingRelationId: null,
     selectedTableIds: new Set(),
@@ -19,11 +22,21 @@
     importTimer: null,
     sqlPanelHidden: false,
     exportPreview: null,
+    schemaLoadId: 0,
+    sqlErrorLine: null,
+    sqlErrorColumn: null,
+    sqlFormatting: false,
   };
 
   const SQL_EXPORT_MS = 400;
   const SQL_IMPORT_MS = 700;
   const SQL_PANEL_KEY = 'elsa-dbdesign-sql-panel';
+  const CANVAS_ZOOM_KEY = 'elsa-dbdesign-canvas-zoom';
+  const CANVAS_BASE_W = 2400;
+  const CANVAS_BASE_H = 1600;
+  const CANVAS_ZOOM_MIN = 0.25;
+  const CANVAS_ZOOM_MAX = 2.5;
+  const CANVAS_ZOOM_STEP = 0.1;
 
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
@@ -31,6 +44,7 @@
   const DESIGNER_BTNS = [
     'btnAddTable', 'btnAutoLayout', 'btnReloadSchema', 'btnToggleSql',
     'btnCopySQL', 'btnDownloadSQL', 'btnExportDiagram', 'exportImageStyle', 'exportImageFormat', 'exportDialect',
+    'btnCanvasZoomIn', 'btnCanvasZoomOut', 'btnCanvasZoomReset',
   ];
 
   const DIAGRAM_THEMES = {
@@ -97,7 +111,12 @@
     const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
     const text = await res.text();
     let data = text ? JSON.parse(text) : null;
-    if (!res.ok) throw new Error(data?.error || res.statusText);
+    if (!res.ok) {
+      const err = new Error(data?.error || res.statusText);
+      err.line = data?.line || 0;
+      err.column = data?.column || 0;
+      throw err;
+    }
     return data;
   }
 
@@ -111,6 +130,195 @@
 
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  const SQL_HL_KEYWORDS = new Set([
+    'CREATE', 'TABLE', 'ALTER', 'DROP', 'ADD', 'CONSTRAINT', 'PRIMARY', 'KEY', 'FOREIGN',
+    'REFERENCES', 'UNIQUE', 'INDEX', 'NOT', 'NULL', 'DEFAULT', 'AUTO_INCREMENT', 'AUTOINCREMENT',
+    'GENERATED', 'BY', 'IDENTITY', 'ON', 'DELETE', 'UPDATE', 'CASCADE', 'RESTRICT', 'SET',
+    'IF', 'EXISTS', 'AS', 'ENUM', 'TYPE', 'TRUE', 'FALSE', 'CURRENT_TIMESTAMP', 'CURRENT_DATE',
+    'CURRENT_TIME', 'NOW', 'NO', 'ACTION', 'USING', 'BTREE',
+  ]);
+
+  const SQL_HL_TYPES = new Set([
+    'INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'MEDIUMINT', 'SERIAL', 'BIGSERIAL', 'SMALLSERIAL',
+    'VARCHAR', 'CHAR', 'TEXT', 'LONGTEXT', 'MEDIUMTEXT', 'TINYTEXT', 'BOOLEAN', 'BOOL', 'DATE',
+    'DATETIME', 'TIMESTAMP', 'TIME', 'DECIMAL', 'NUMERIC', 'FLOAT', 'DOUBLE', 'REAL', 'JSON', 'JSONB',
+    'BLOB', 'BYTEA', 'UUID', 'BIT', 'DOUBLE PRECISION',
+  ]);
+
+  function highlightSql(sql) {
+    let out = '';
+    let i = 0;
+    while (i < sql.length) {
+      const ch = sql[i];
+
+      if (ch === '-' && sql[i + 1] === '-') {
+        const end = sql.indexOf('\n', i);
+        const chunk = end === -1 ? sql.slice(i) : sql.slice(i, end);
+        out += `<span class="sql-hl-comment">${esc(chunk)}</span>`;
+        i += chunk.length;
+        continue;
+      }
+
+      if (ch === '\'' || ch === '"') {
+        let j = i + 1;
+        while (j < sql.length) {
+          if (sql[j] === ch && sql[j - 1] !== '\\') break;
+          j++;
+        }
+        if (j < sql.length) j++;
+        out += `<span class="sql-hl-str">${esc(sql.slice(i, j))}</span>`;
+        i = j;
+        continue;
+      }
+
+      if (ch === '`') {
+        let j = i + 1;
+        while (j < sql.length && sql[j] !== '`') j++;
+        if (j < sql.length) j++;
+        out += `<span class="sql-hl-ident">${esc(sql.slice(i, j))}</span>`;
+        i = j;
+        continue;
+      }
+
+      if (ch >= '0' && ch <= '9') {
+        let j = i + 1;
+        while (j < sql.length && /[0-9.]/.test(sql[j])) j++;
+        out += `<span class="sql-hl-num">${esc(sql.slice(i, j))}</span>`;
+        i = j;
+        continue;
+      }
+
+      if (/[A-Za-z_]/.test(ch)) {
+        let j = i + 1;
+        while (j < sql.length && /[A-Za-z0-9_]/.test(sql[j])) j++;
+        const word = sql.slice(i, j);
+        const upper = word.toUpperCase();
+        let cls = 'sql-hl-ident';
+        if (SQL_HL_KEYWORDS.has(upper)) cls = 'sql-hl-kw';
+        else if (SQL_HL_TYPES.has(upper)) cls = 'sql-hl-type';
+        out += `<span class="${cls}">${esc(word)}</span>`;
+        i = j;
+        continue;
+      }
+
+      out += `<span class="sql-hl-punct">${esc(ch)}</span>`;
+      i++;
+    }
+    return out;
+  }
+
+  function highlightSqlEditorContent(sql, errorLine) {
+    if (!errorLine) return highlightSql(sql);
+    const lines = sql.split('\n');
+    return lines.map((line, i) => {
+      const content = highlightSql(line);
+      if (i + 1 === errorLine) {
+        return `<span class="sql-hl-error-line">${content || ' '}</span>`;
+      }
+      return content;
+    }).join('\n');
+  }
+
+  function refreshSqlEditorHighlight() {
+    const ta = $('#sqlEditor');
+    const code = $('#sqlEditorHighlight code');
+    if (!ta || !code) return;
+    const scrollTop = ta.scrollTop;
+    const scrollLeft = ta.scrollLeft;
+    const value = ta.value;
+    code.innerHTML = `${highlightSqlEditorContent(value, state.sqlErrorLine)}${value.endsWith('\n') ? '\n' : ''}`;
+    ta.scrollTop = scrollTop;
+    ta.scrollLeft = scrollLeft;
+    syncSqlEditorScroll();
+  }
+
+  function syncSqlEditorScroll() {
+    const ta = $('#sqlEditor');
+    const code = $('#sqlEditorHighlight code');
+    if (!ta || !code) return;
+    code.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
+  }
+
+  function sqlErrorStatusText(message, line, column) {
+    const loc = line ? `Line ${line}${column ? `:${column}` : ''} — ` : '';
+    return `${loc}${message || 'Invalid SQL'}`;
+  }
+
+  function scrollSqlEditorToLine(line) {
+    const ta = $('#sqlEditor');
+    if (!ta || !line) return;
+    const style = getComputedStyle(ta);
+    const lineHeight = parseFloat(style.lineHeight) || 18;
+    ta.scrollTop = Math.max(0, (line - 1) * lineHeight - ta.clientHeight / 3);
+  }
+
+  function setSqlEditorInvalid(invalid, message, line, column) {
+    state.sqlErrorLine = invalid ? (line || null) : null;
+    state.sqlErrorColumn = invalid ? (column || null) : null;
+    $('#sqlEditorShell')?.classList.toggle('is-invalid', !!invalid);
+    refreshSqlEditorHighlight();
+    if (invalid) {
+      setSqlSyncStatus('Failed', 'error', {
+        panel: sqlErrorStatusText(message, line, column),
+      });
+      scrollSqlEditorToLine(line);
+    }
+  }
+
+  function clearSqlEditorInvalid() {
+    state.sqlErrorLine = null;
+    state.sqlErrorColumn = null;
+    $('#sqlEditorShell')?.classList.remove('is-invalid');
+    refreshSqlEditorHighlight();
+  }
+
+  async function formatSqlEditorOnBlur() {
+    if (!state.activeProjectId || state.syncFrom === 'export' || state.sqlFormatting) return;
+    const ta = $('#sqlEditor');
+    if (!ta) return;
+    const raw = ta.value;
+    if (!raw.trim()) return;
+
+    const dialect = $('#exportDialect')?.value || 'mysql';
+    state.sqlFormatting = true;
+    try {
+      const result = await api(`/api/projects/${state.activeProjectId}/format`, {
+        method: 'POST',
+        body: JSON.stringify({ sql: raw, dialect }),
+      });
+      if (!result?.sql || result.sql === raw) return;
+      const scrollTop = ta.scrollTop;
+      const scrollLeft = ta.scrollLeft;
+      ta.value = result.sql;
+      refreshSqlEditorHighlight();
+      ta.scrollTop = scrollTop;
+      ta.scrollLeft = scrollLeft;
+      if (state.syncFrom === 'export') return;
+      setSqlSyncStatus('Pending…');
+      scheduleImportFromEditor();
+    } catch (_) {
+      // Keep invalid or unchanged SQL as-is.
+    } finally {
+      state.sqlFormatting = false;
+    }
+  }
+
+  function initSqlEditor() {
+    const ta = $('#sqlEditor');
+    if (!ta) return;
+    ta.addEventListener('input', () => {
+      refreshSqlEditorHighlight();
+      if (state.syncFrom === 'export') return;
+      clearSqlEditorInvalid();
+      setSqlSyncStatus('Pending…');
+      scheduleImportFromEditor();
+    });
+    ta.addEventListener('blur', () => { formatSqlEditorOnBlur(); });
+    ta.addEventListener('scroll', syncSqlEditorScroll, { passive: true });
+    ta.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+    refreshSqlEditorHighlight();
   }
 
   function formatDataTypeDisplay(type) {
@@ -167,18 +375,26 @@
       const el = $('#' + id);
       if (el) el.disabled = !on;
     });
+    updateCanvasZoomUI();
   }
 
-  function setSqlSyncStatus(msg, type) {
+  function setSqlSyncStatus(msg, type, opts = {}) {
     const toolbar = $('#sqlSyncStatus');
     const panel = $('#sqlPanelStatus');
-    [toolbar, panel].forEach((el) => {
-      if (!el) return;
-      el.textContent = msg || '';
-      el.hidden = !msg;
-      el.classList.remove('ok', 'error');
-      if (type) el.classList.add(type);
-    });
+    const toolbarMsg = opts.toolbar ?? msg;
+    const panelMsg = opts.panel ?? msg;
+    if (toolbar) {
+      toolbar.textContent = toolbarMsg || '';
+      toolbar.hidden = !toolbarMsg;
+      toolbar.classList.remove('ok', 'error');
+      if (type) toolbar.classList.add(type);
+    }
+    if (panel) {
+      panel.textContent = panelMsg || '';
+      panel.hidden = !panelMsg;
+      panel.classList.remove('ok', 'error');
+      if (type) panel.classList.add(type);
+    }
   }
 
   function applySqlPanelVisibility() {
@@ -214,7 +430,9 @@
     if (name === 'projects') rotateProjectsTagline();
     if (name === 'designer') {
       rotateDesignerHint();
-      renderCanvas();
+      if (!$('#designerSplit')?.classList.contains('is-loading')) {
+        renderCanvas();
+      }
     }
   }
 
@@ -238,17 +456,18 @@
   }
 
   const DESIGNER_TIPS = [
-    'Select tables: drag on empty canvas or Shift/Ctrl+click · move the group by dragging any selected table.',
+    'Hold Ctrl and drag the canvas to pan — Ctrl + scroll wheel zooms in/out.',
+    'Select tables: drag on empty canvas or Shift+click · move the group by dragging any selected table.',
     'Double-click a table to edit columns, types, PK/FK flags, and ENUM values.',
     'Drag from one column to another table\'s column to create a foreign key. Click a relation line to set ON DELETE / ON UPDATE.',
     'SQL panel ↔ canvas stay in sync — edit CREATE TABLE here and the diagram updates (and vice versa).',
-    'Auto layout tidies tables left-to-right based on FK depth — great after importing SQL.',
+    'Auto layout orders tables left-to-right by FK depth and aligns related tables vertically to reduce crossing lines.',
     'Export diagram as PNG or SVG; Minimal (print) gives a white background for docs or skripsi.',
     'Pick MySQL, PostgreSQL, or SQLite in the toolbar before Copy or Download SQL.',
     'ENUM or SET? Double-click the table, then Manage values… for a proper list editor.',
     'Hide SQL when you want more canvas — toggle Show/Hide SQL anytime from the toolbar.',
     'Paste existing DDL into the SQL panel to pull tables onto the canvas in one go.',
-    'Shift/Ctrl+click adds tables to your selection without clearing the rest.',
+    'Shift+click adds tables to your selection without clearing the rest.',
     'Reload pulls the latest schema from the server if something feels out of date.',
     'In the column editor, drag the ⋮⋮ handle to reorder columns — canvas and exported SQL follow the same order.',
     'Default values use type-aware controls — pick from dropdown for ENUM/DATETIME, integers block letters.',
@@ -293,9 +512,18 @@
 
     list.querySelectorAll('[data-open]').forEach((b) => {
       b.addEventListener('click', async () => {
-        state.activeProjectId = +b.dataset.open;
-        await loadSchema();
+        const id = +b.dataset.open;
+        if (id === state.activeProjectId && state.schema?.project?.id === id
+          && !$('#designerSplit')?.classList.contains('is-loading')) {
+          showPage('designer');
+          return;
+        }
+        state.activeProjectId = id;
+        const p = state.projects.find((x) => x.id === id);
+        clearDesignerPending();
+        setDesignerLoading(true, p?.name);
         showPage('designer');
+        await loadSchema({ skipLoadingUi: true });
       });
     });
     list.querySelectorAll('[data-edit-proj]').forEach((b) => {
@@ -308,13 +536,18 @@
         if (state.activeProjectId === +b.dataset.delProj) {
           state.activeProjectId = null;
           state.schema = null;
+          state.schemaLoadId += 1;
           state.lastSyncedSql = '';
           clearTimeout(state.exportTimer);
           clearTimeout(state.importTimer);
+          clearDesignerPending();
+          $('#designerSplit')?.classList.remove('is-loading');
           setDesignerEnabled(false);
           setSqlSyncStatus('');
           $('#designerProjectName').textContent = 'No project selected';
           $('#sqlEditor').value = '';
+          $('#canvas').innerHTML = '';
+          drawRelations();
         }
         await loadProjects();
         toast('Project deleted');
@@ -378,19 +611,84 @@
   });
 
   // --- Schema / Canvas ---
-  async function loadSchema(options = {}) {
+  function clearDesignerPending() {
+    clearTimeout(state.exportTimer);
+    clearTimeout(state.importTimer);
+    state.syncFrom = null;
+    state.selectedTableIds.clear();
+    state.drag = null;
+    state.resize = null;
+    state.linkDrag = null;
+    state.pendingRelation = null;
+    state.editingTableId = null;
+    state.editingRelationId = null;
+  }
+
+  function setDesignerLoading(loading, projectName) {
+    const split = $('#designerSplit');
+    split?.classList.toggle('is-loading', loading);
+    if (!loading) return;
+
+    const pName = projectName || 'Loading…';
+    $('#designerProjectName').textContent = pName;
+    setDesignerEnabled(false);
+    state.schema = null;
+    $('#canvas').innerHTML = '';
+    $('#canvasEmpty').style.display = 'none';
+    $('#sqlEditor').value = '';
+    state.lastSyncedSql = '';
+    refreshSqlEditorHighlight();
+    setSqlSyncStatus('Loading…');
+    drawRelations();
+  }
+
+  function applySchemaToDesigner(options = {}) {
     const { pushSql = true } = options;
-    if (!state.activeProjectId) return;
-    state.schema = await api(`/api/projects/${state.activeProjectId}/schema`);
+    if (!state.schema) return;
+
+    $('#designerSplit')?.classList.remove('is-loading');
     $('#designerProjectName').textContent = state.schema.project.name;
     const dialect = state.schema.project.dialect || 'mysql';
     if ($('#exportDialect')) $('#exportDialect').value = dialect;
     setDesignerEnabled(true);
-    $('#canvasEmpty').style.display = 'none';
+    $('#canvasEmpty').style.display = (state.schema.tables?.length ? 'none' : 'flex');
     state.selectedTableIds.clear();
     renderCanvas();
     if (pushSql) scheduleExportToEditor();
     else setSqlSyncStatus('Synced', 'ok');
+  }
+
+  async function loadSchema(options = {}) {
+    const { pushSql = true, skipLoadingUi = false } = options;
+    if (!state.activeProjectId) return;
+
+    const loadId = ++state.schemaLoadId;
+    const projectId = state.activeProjectId;
+
+    if (!skipLoadingUi && !$('#designerSplit')?.classList.contains('is-loading')) {
+      const p = state.projects.find((x) => x.id === projectId);
+      clearDesignerPending();
+      setDesignerLoading(true, p?.name);
+    }
+
+    try {
+      const schema = await api(`/api/projects/${projectId}/schema`);
+      if (loadId !== state.schemaLoadId || state.activeProjectId !== projectId) return;
+
+      state.schema = schema;
+      applySchemaToDesigner({ pushSql });
+    } catch (err) {
+      if (loadId !== state.schemaLoadId) return;
+      $('#designerSplit')?.classList.remove('is-loading');
+      setDesignerEnabled(false);
+      state.schema = null;
+      $('#canvas').innerHTML = '';
+      $('#canvasEmpty').style.display = 'flex';
+      $('#sqlEditor').value = '';
+      setSqlSyncStatus('');
+      drawRelations();
+      toast(err.message, 'error');
+    }
   }
 
   function scheduleExportToEditor() {
@@ -411,12 +709,14 @@
       const editor = $('#sqlEditor');
       if (editor && editor.value !== result.sql) {
         editor.value = result.sql;
+        refreshSqlEditorHighlight();
       }
+      clearSqlEditorInvalid();
       state.lastSyncedSql = result.sql;
       state.lastExport = result;
       setSqlSyncStatus('Synced', 'ok');
     } catch (err) {
-      setSqlSyncStatus(err.message, 'error');
+      setSqlSyncStatus('Failed', 'error', { panel: err.message });
     } finally {
       state.syncFrom = null;
     }
@@ -430,33 +730,55 @@
   async function importFromEditor() {
     if (!state.activeProjectId || state.syncFrom === 'export') return;
     const sql = $('#sqlEditor')?.value.trim() || '';
-    if (!sql || sql === state.lastSyncedSql) {
-      if (sql === state.lastSyncedSql) setSqlSyncStatus('Synced', 'ok');
+    if (!sql) {
+      clearSqlEditorInvalid();
+      setSqlSyncStatus('');
       return;
     }
+    if (sql === state.lastSyncedSql) {
+      clearSqlEditorInvalid();
+      setSqlSyncStatus('Synced', 'ok');
+      return;
+    }
+
+    const loadId = ++state.schemaLoadId;
+    const projectId = state.activeProjectId;
+
+    setSqlSyncStatus('Checking SQL…');
+    try {
+      await api(`/api/projects/${projectId}/validate`, {
+        method: 'POST',
+        body: JSON.stringify({ sql }),
+      });
+    } catch (err) {
+      if (loadId !== state.schemaLoadId) return;
+      setSqlEditorInvalid(true, err.message, err.line, err.column);
+      return;
+    }
+
+    if (loadId !== state.schemaLoadId || state.activeProjectId !== projectId) return;
+
     state.syncFrom = 'import';
     setSqlSyncStatus('Updating diagram…');
     try {
-      await api(`/api/projects/${state.activeProjectId}/import`, {
+      await api(`/api/projects/${projectId}/import`, {
         method: 'POST',
         body: JSON.stringify({ sql, replace: true }),
       });
+      if (loadId !== state.schemaLoadId || state.activeProjectId !== projectId) return;
       state.lastSyncedSql = sql;
-      state.schema = await api(`/api/projects/${state.activeProjectId}/schema`);
-      renderCanvas();
+      state.schema = await api(`/api/projects/${projectId}/schema`);
+      if (loadId !== state.schemaLoadId || state.activeProjectId !== projectId) return;
+      clearSqlEditorInvalid();
+      applySchemaToDesigner({ pushSql: false });
       setSqlSyncStatus('Synced', 'ok');
     } catch (err) {
-      setSqlSyncStatus(err.message, 'error');
+      if (loadId !== state.schemaLoadId) return;
+      setSqlEditorInvalid(true, err.message, err.line, err.column);
     } finally {
       state.syncFrom = null;
     }
   }
-
-  $('#sqlEditor')?.addEventListener('input', () => {
-    if (state.syncFrom === 'export') return;
-    setSqlSyncStatus('Pending…');
-    scheduleImportFromEditor();
-  });
 
   $('#exportDialect')?.addEventListener('change', async () => {
     scheduleExportToEditor();
@@ -479,12 +801,172 @@
     }
   });
 
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
+  function shouldCanvasPan(e) {
+    return e.button === 0 && e.ctrlKey;
+  }
+
+  function startCanvasPan(e) {
+    if (!shouldCanvasPan(e)) return;
+    e.preventDefault();
+    const scroll = $('#canvasScroll');
+    if (!scroll) return;
+    state.pan = {
+      startX: e.clientX,
+      startY: e.clientY,
+      scrollLeft: scroll.scrollLeft,
+      scrollTop: scroll.scrollTop,
+    };
+    scroll.classList.add('pan-active');
+    document.addEventListener('mousemove', onCanvasPan);
+    document.addEventListener('mouseup', endCanvasPan);
+  }
+
+  function onCanvasPan(e) {
+    if (!state.pan) return;
+    const scroll = $('#canvasScroll');
+    if (!scroll) return;
+    scroll.scrollLeft = state.pan.scrollLeft - (e.clientX - state.pan.startX);
+    scroll.scrollTop = state.pan.scrollTop - (e.clientY - state.pan.startY);
+  }
+
+  function endCanvasPan() {
+    document.removeEventListener('mousemove', onCanvasPan);
+    document.removeEventListener('mouseup', endCanvasPan);
+    $('#canvasScroll')?.classList.remove('pan-active');
+    state.pan = null;
+  }
+
+  function setCanvasPanReady(on) {
+    $('#canvasScroll')?.classList.toggle('pan-ready', on);
+  }
+
+  function initCanvasPan() {
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Control' && !e.repeat && !isTypingTarget(document.activeElement)) {
+        setCanvasPanReady(true);
+      }
+    });
+    document.addEventListener('keyup', (e) => {
+      if (e.key === 'Control') {
+        setCanvasPanReady(false);
+        endCanvasPan();
+      }
+    });
+    window.addEventListener('blur', () => {
+      setCanvasPanReady(false);
+      endCanvasPan();
+    });
+  }
+
+  function getCanvasZoom() {
+    return state.canvasZoom || 1;
+  }
+
+  function clampCanvasZoom(z) {
+    return Math.min(CANVAS_ZOOM_MAX, Math.max(CANVAS_ZOOM_MIN, z));
+  }
+
+  function formatCanvasZoomLabel(zoom) {
+    return `${Math.round(zoom * 100)}%`;
+  }
+
+  function updateCanvasZoomUI() {
+    const label = $('#canvasZoomLabel');
+    if (label) label.textContent = formatCanvasZoomLabel(getCanvasZoom());
+    const controls = $('#canvasZoomControls');
+    if (controls) controls.hidden = !state.activeProjectId;
+  }
+
+  function applyCanvasZoom() {
+    const zoom = getCanvasZoom();
+    const stage = $('#canvasStage');
+    const shell = $('#canvasZoomShell');
+    if (!stage || !shell) return;
+    stage.style.transform = zoom === 1 ? '' : `scale(${zoom})`;
+    shell.style.width = `${CANVAS_BASE_W * zoom}px`;
+    shell.style.height = `${CANVAS_BASE_H * zoom}px`;
+    updateCanvasZoomUI();
+    drawRelations();
+  }
+
+  function setCanvasZoom(nextZoom, focal) {
+    const scroll = $('#canvasScroll');
+    const prev = getCanvasZoom();
+    const zoom = clampCanvasZoom(nextZoom);
+    if (scroll && focal && prev !== zoom) {
+      const logicalX = (scroll.scrollLeft + focal.x) / prev;
+      const logicalY = (scroll.scrollTop + focal.y) / prev;
+      state.canvasZoom = zoom;
+      applyCanvasZoom();
+      scroll.scrollLeft = Math.max(0, logicalX * zoom - focal.x);
+      scroll.scrollTop = Math.max(0, logicalY * zoom - focal.y);
+    } else {
+      state.canvasZoom = zoom;
+      applyCanvasZoom();
+    }
+    try {
+      sessionStorage.setItem(CANVAS_ZOOM_KEY, String(zoom));
+    } catch (_) {}
+  }
+
+  function nudgeCanvasZoom(delta, focal) {
+    setCanvasZoom(getCanvasZoom() + delta, focal);
+  }
+
+  function resetCanvasZoom() {
+    setCanvasZoom(1);
+  }
+
+  function initCanvasZoom() {
+    try {
+      const saved = parseFloat(sessionStorage.getItem(CANVAS_ZOOM_KEY) || '1');
+      if (!Number.isNaN(saved)) state.canvasZoom = clampCanvasZoom(saved);
+    } catch (_) {}
+    applyCanvasZoom();
+
+    $('#btnCanvasZoomIn')?.addEventListener('click', () => {
+      nudgeCanvasZoom(CANVAS_ZOOM_STEP, canvasZoomFocalCenter());
+    });
+    $('#btnCanvasZoomOut')?.addEventListener('click', () => {
+      nudgeCanvasZoom(-CANVAS_ZOOM_STEP, canvasZoomFocalCenter());
+    });
+    $('#btnCanvasZoomReset')?.addEventListener('click', () => resetCanvasZoom());
+
+    $('#canvasScroll')?.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey || isTypingTarget(document.activeElement)) return;
+      if (!state.activeProjectId) return;
+      e.preventDefault();
+      const scroll = $('#canvasScroll');
+      if (!scroll) return;
+      const rect = scroll.getBoundingClientRect();
+      const delta = e.deltaY < 0 ? CANVAS_ZOOM_STEP : -CANVAS_ZOOM_STEP;
+      nudgeCanvasZoom(delta, {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+    }, { passive: false });
+  }
+
+  function canvasZoomFocalCenter() {
+    const scroll = $('#canvasScroll');
+    if (!scroll) return null;
+    return { x: scroll.clientWidth / 2, y: scroll.clientHeight / 2 };
+  }
+
   function getCanvasPoint(e) {
-    const cr = $('#canvas')?.getBoundingClientRect();
-    if (!cr) return { x: 0, y: 0 };
+    const scroll = $('#canvasScroll');
+    if (!scroll) return { x: 0, y: 0 };
+    const zoom = getCanvasZoom();
+    const scrollRect = scroll.getBoundingClientRect();
     return {
-      x: e.clientX - cr.left,
-      y: e.clientY - cr.top,
+      x: (e.clientX - scrollRect.left + scroll.scrollLeft) / zoom,
+      y: (e.clientY - scrollRect.top + scroll.scrollTop) / zoom,
     };
   }
 
@@ -513,7 +995,7 @@
   function startMarquee(e) {
     if (state.linkDrag || state.drag) return;
     e.preventDefault();
-    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    const additive = e.shiftKey || e.metaKey;
     if (!additive) clearSelection();
 
     const pt = getCanvasPoint(e);
@@ -580,6 +1062,10 @@
     const canvas = $('#canvas');
     canvas?.addEventListener('mousedown', (e) => {
       if (e.button !== 0 || state.linkDrag) return;
+      if (shouldCanvasPan(e)) {
+        startCanvasPan(e);
+        return;
+      }
       if (e.target.closest('.table-node')) return;
       startMarquee(e);
     });
@@ -603,11 +1089,19 @@
       const id = +node.dataset.id;
       const header = node.querySelector('.table-header');
       header?.addEventListener('mousedown', (e) => {
-        if (e.target.closest('.col-list')) return;
+        if (shouldCanvasPan(e)) {
+          startCanvasPan(e);
+          return;
+        }
+        if (e.target.closest('.col-list') || e.target.closest('.table-resize-handle')) return;
         startDrag(e, id, node);
       });
+      node.querySelector('.table-resize-handle')?.addEventListener('mousedown', (e) => {
+        startResize(e, id, node);
+      });
       node.addEventListener('dblclick', (e) => {
-        if (!e.target.closest('.col-list')) openTableModal(id);
+        if (e.target.closest('.col-list') || e.target.closest('.table-resize-handle')) return;
+        openTableModal(id);
       });
       node.querySelectorAll('.col-list li').forEach((li) => {
         li.addEventListener('mousedown', (e) => startLinkDrag(e, id, +li.dataset.colId, li));
@@ -635,6 +1129,7 @@
         <div class="table-header"><span class="table-title" title="${esc(t.name)}">${esc(t.name)}</span> <span class="edit-hint">dbl-click</span></div>
         <ul class="col-list">${cols}</ul>
         ${indexes}
+        <div class="table-resize-handle" title="Drag to resize width"></div>
       </div>`;
   }
 
@@ -662,11 +1157,11 @@
   }
 
   function startDrag(e, tableId, node) {
-    if (e.button !== 0 || state.linkDrag) return;
+    if (e.button !== 0 || state.linkDrag || e.ctrlKey) return;
     e.preventDefault();
     e.stopPropagation();
 
-    const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+    const additive = e.shiftKey || e.metaKey;
     if (additive) {
       if (state.selectedTableIds.has(tableId)) state.selectedTableIds.delete(tableId);
       else state.selectedTableIds.add(tableId);
@@ -754,14 +1249,65 @@
     }
   }
 
+  function startResize(e, tableId, node) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (state.drag || state.linkDrag || state.marquee) return;
+
+    const startX = e.clientX;
+    const startW = node.offsetWidth;
+    node.classList.add('is-resizing');
+
+    state.resize = { tableId, node, startX, startW };
+
+    function onResizeMove(ev) {
+      if (!state.resize) return;
+      const dx = ev.clientX - state.resize.startX;
+      const w = clampCanvasTableWidth(state.resize.startW + dx);
+      state.resize.node.style.width = `${w}px`;
+      drawRelations();
+    }
+
+    async function endResize() {
+      document.removeEventListener('mousemove', onResizeMove);
+      document.removeEventListener('mouseup', endResize);
+      if (!state.resize) return;
+
+      const { tableId: id, node: n } = state.resize;
+      const w = clampCanvasTableWidth(n.offsetWidth);
+      state.resize = null;
+      n.classList.remove('is-resizing');
+
+      try {
+        await api(`/api/tables/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ width: w }),
+        });
+        const t = state.schema.tables.find((x) => x.id === id);
+        if (t) t.width = w;
+      } catch (err) {
+        toast(err.message, 'error');
+        await loadSchema({ pushSql: false });
+      }
+    }
+
+    document.addEventListener('mousemove', onResizeMove);
+    document.addEventListener('mouseup', endResize);
+  }
+
   function colRectInCanvas(el, canvas) {
-    const canvasRect = canvas.getBoundingClientRect();
+    const scroll = $('#canvasScroll');
+    if (!scroll || !el) {
+      return { left: 0, top: 0, width: 0, height: 0 };
+    }
+    const zoom = getCanvasZoom();
+    const scrollRect = scroll.getBoundingClientRect();
     const r = el.getBoundingClientRect();
     return {
-      left: r.left - canvasRect.left,
-      top: r.top - canvasRect.top,
-      width: r.width,
-      height: r.height,
+      left: (r.left - scrollRect.left + scroll.scrollLeft) / zoom,
+      top: (r.top - scrollRect.top + scroll.scrollTop) / zoom,
+      width: r.width / zoom,
+      height: r.height / zoom,
     };
   }
 
@@ -777,57 +1323,148 @@
     return { x: r.left + r.width / 2, y: cy };
   }
 
-  function relationAnchors(fromTableId, fromColId, toTableId, toColId) {
-    const aCenter = colAnchor(fromTableId, fromColId, 'center');
-    const bCenter = colAnchor(toTableId, toColId, 'center');
-    if (!aCenter || !bCenter) return null;
-    if (aCenter.x <= bCenter.x) {
+  const SELF_REF_LOOP_OUT = 40;
+  const SELF_REF_ARROW = 6;
+
+  function tableEdgesInCanvas(tableId) {
+    const node = document.querySelector(`.table-node[data-id="${tableId}"]`);
+    const canvas = $('#canvas');
+    if (!node || !canvas) return null;
+    const r = colRectInCanvas(node, canvas);
+    return { left: r.left, right: r.left + r.width };
+  }
+
+  function selfRefDrawPoints(x1, y1, x2, y2, side) {
+    if (side === 'left') {
       return {
-        a: colAnchor(fromTableId, fromColId, 'right'),
-        b: colAnchor(toTableId, toColId, 'left'),
+        sx: x1,
+        sy: y1,
+        ex: x2 - SELF_REF_ARROW,
+        ey: y2,
+        tipX: x2,
+        tipY: y2,
+        side: 'left',
       };
     }
     return {
-      a: colAnchor(fromTableId, fromColId, 'left'),
-      b: colAnchor(toTableId, toColId, 'right'),
+      sx: x1,
+      sy: y1,
+      ex: x2 + SELF_REF_ARROW,
+      ey: y2,
+      tipX: x2,
+      tipY: y2,
+      side: 'right',
+    };
+  }
+
+  function relationEndpointsFromPorts(fromPorts, toPorts, opts = {}) {
+    if (opts.selfRef) {
+      if (fromPorts.y > toPorts.y) {
+        return {
+          a: { x: fromPorts.right, y: fromPorts.y },
+          b: { x: toPorts.right, y: toPorts.y },
+          selfRefSide: 'right',
+        };
+      }
+      if (fromPorts.y < toPorts.y) {
+        return {
+          a: { x: fromPorts.left, y: fromPorts.y },
+          b: { x: toPorts.left, y: toPorts.y },
+          selfRefSide: 'left',
+        };
+      }
+      return {
+        a: { x: fromPorts.right, y: fromPorts.y },
+        b: { x: toPorts.right, y: toPorts.y },
+        selfRefSide: 'right',
+      };
+    }
+    const fromCx = (fromPorts.left + fromPorts.right) / 2;
+    const toCx = (toPorts.left + toPorts.right) / 2;
+    if (fromCx <= toCx) {
+      return {
+        a: { x: fromPorts.right, y: fromPorts.y },
+        b: { x: toPorts.left, y: toPorts.y },
+      };
+    }
+    return {
+      a: { x: fromPorts.left, y: fromPorts.y },
+      b: { x: toPorts.right, y: toPorts.y },
+    };
+  }
+
+  function relationAnchors(fromTableId, fromColId, toTableId, toColId) {
+    const fromLeft = colAnchor(fromTableId, fromColId, 'left');
+    const fromRight = colAnchor(fromTableId, fromColId, 'right');
+    const toLeft = colAnchor(toTableId, toColId, 'left');
+    const toRight = colAnchor(toTableId, toColId, 'right');
+    if (!fromLeft || !fromRight || !toLeft || !toRight) return null;
+    const selfRef = fromTableId === toTableId;
+    let fromPorts = { left: fromLeft.x, right: fromRight.x, y: fromLeft.y };
+    let toPorts = { left: toLeft.x, right: toRight.x, y: toLeft.y };
+    if (selfRef) {
+      const edges = tableEdgesInCanvas(fromTableId);
+      if (edges) {
+        fromPorts = { left: edges.left, right: edges.right, y: fromLeft.y };
+        toPorts = { left: edges.left, right: edges.right, y: toLeft.y };
+      }
+    }
+    const endpoints = relationEndpointsFromPorts(fromPorts, toPorts, { selfRef });
+    return {
+      a: endpoints.a,
+      b: endpoints.b,
+      selfRef,
+      selfRefSide: endpoints.selfRefSide,
     };
   }
 
   function resizeSvgToCanvas() {
     const canvas = $('#canvas');
-    const svg = $('#relationSvg');
-    if (!canvas || !svg) return;
+    const svgs = [$('#relationSvg'), $('#relationSvgSelf'), $('#relationSvgHit')];
+    if (!canvas) return;
     const w = canvas.offsetWidth;
     const h = canvas.offsetHeight;
-    svg.setAttribute('width', w);
-    svg.setAttribute('height', h);
-    svg.style.width = w + 'px';
-    svg.style.height = h + 'px';
+    svgs.forEach((svg) => {
+      if (!svg) return;
+      svg.setAttribute('width', w);
+      svg.setAttribute('height', h);
+      svg.style.width = `${w}px`;
+      svg.style.height = `${h}px`;
+    });
   }
 
-  function pathD(x1, y1, x2, y2) {
+  function pathD(x1, y1, x2, y2, opts = {}) {
+    if (opts.selfRef) {
+      const pts = selfRefDrawPoints(x1, y1, x2, y2, opts.selfRefSide);
+      const loopOut = opts.loopOut || SELF_REF_LOOP_OUT;
+      const loopX = pts.side === 'left' ? pts.sx - loopOut : pts.sx + loopOut;
+      return `M${pts.sx},${pts.sy} C${loopX},${pts.sy} ${loopX},${pts.ey} ${pts.ex},${pts.ey}`;
+    }
     const midX = x1 + (x2 - x1) / 2;
     return `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`;
   }
 
-  function relationArrowHead(x1, y1, x2, y2, size = 7) {
+  function relationArrowHead(x1, y1, x2, y2, size = SELF_REF_ARROW, opts = {}) {
+    if (opts.selfRef) {
+      const pts = selfRefDrawPoints(x1, y1, x2, y2, opts.selfRefSide);
+      if (pts.side === 'left') {
+        const baseX = pts.tipX - size;
+        return `M${pts.tipX},${pts.tipY} L${baseX},${pts.tipY - size * 0.55} L${baseX},${pts.tipY + size * 0.55} Z`;
+      }
+      const baseX = pts.tipX + size;
+      return `M${pts.tipX},${pts.tipY} L${baseX},${pts.tipY - size * 0.55} L${baseX},${pts.tipY + size * 0.55} Z`;
+    }
     const dir = x2 >= x1 ? 1 : -1;
     const baseX = x2 - dir * size;
     return `M${x2},${y2} L${baseX},${y2 - size * 0.55} L${baseX},${y2 + size * 0.55} Z`;
   }
 
-  function relationPathSvg(x1, y1, x2, y2, stroke, strokeWidth, arrowFill) {
+  function relationPathSvg(x1, y1, x2, y2, stroke, strokeWidth, arrowFill, opacity = 0.82, opts = {}) {
+    const pathOpts = opts.selfRef ? { ...opts, loopOut: SELF_REF_LOOP_OUT } : opts;
     return [
-      `<path d="${pathD(x1, y1, x2, y2)}" stroke="${stroke}" stroke-width="${strokeWidth}" fill="none"/>`,
-      `<path d="${relationArrowHead(x1, y1, x2, y2)}" fill="${arrowFill}" stroke="none"/>`,
+      `<path d="${pathD(x1, y1, x2, y2, pathOpts)}" stroke="${stroke}" stroke-width="${strokeWidth}" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`,
+      `<path d="${relationArrowHead(x1, y1, x2, y2, SELF_REF_ARROW, pathOpts)}" fill="${arrowFill}" stroke="none" opacity="${opacity}"/>`,
     ].join('');
-  }
-
-  function ensureArrowMarker(svg) {
-    if (svg.querySelector('#arrow')) return;
-    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    defs.innerHTML = '<marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#a371f7"/></marker>';
-    svg.appendChild(defs);
   }
 
   async function deleteRelation(relId) {
@@ -905,24 +1542,39 @@
     toast('Schema reloaded');
   }
 
-  function drawRelationPair(svg, x1, y1, x2, y2, relId) {
-    const d = pathD(x1, y1, x2, y2);
+  function drawRelationPair(linesSvg, hitSvg, x1, y1, x2, y2, relId, opts = {}) {
+    const pathOpts = opts.selfRef ? { ...opts, loopOut: SELF_REF_LOOP_OUT } : opts;
+    const d = pathD(x1, y1, x2, y2, pathOpts);
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    line.setAttribute('d', d);
+    line.setAttribute('class', opts.selfRef ? 'rel-line rel-self-ref' : 'rel-line');
+    line.dataset.relId = String(relId);
+
+    const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    arrow.setAttribute('d', relationArrowHead(x1, y1, x2, y2, SELF_REF_ARROW, pathOpts));
+    arrow.setAttribute('class', opts.selfRef ? 'rel-arrow rel-self-ref' : 'rel-arrow');
+    arrow.dataset.relId = String(relId);
+
     const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     hit.setAttribute('d', d);
     hit.setAttribute('class', 'rel-hit');
+    hit.dataset.relId = String(relId);
     hit.addEventListener('click', (e) => {
       e.stopPropagation();
       const rel = state.schema?.relations?.find((r) => r.id === relId);
       if (rel) openRelationModal(rel);
     });
+    const setHover = (on) => {
+      line.classList.toggle('rel-hover', on);
+      arrow.classList.toggle('rel-hover', on);
+    };
+    hit.addEventListener('mouseenter', () => setHover(true));
+    hit.addEventListener('mouseleave', () => setHover(false));
 
-    const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    line.setAttribute('d', d);
-    line.setAttribute('class', 'rel-line');
-    line.setAttribute('marker-end', 'url(#arrow)');
-
-    svg.appendChild(hit);
-    svg.appendChild(line);
+    linesSvg.appendChild(line);
+    linesSvg.appendChild(arrow);
+    hitSvg.appendChild(hit);
   }
 
   function drawPreviewPath(svg, x1, y1, x2, y2) {
@@ -933,11 +1585,14 @@
   }
 
   function drawRelations() {
-    const svg = $('#relationSvg');
-    if (!svg) return;
+    const linesSvg = $('#relationSvg');
+    const linesSvgSelf = $('#relationSvgSelf');
+    const hitSvg = $('#relationSvgHit');
+    if (!linesSvg || !hitSvg) return;
     resizeSvgToCanvas();
-    svg.innerHTML = '';
-    ensureArrowMarker(svg);
+    linesSvg.innerHTML = '';
+    if (linesSvgSelf) linesSvgSelf.innerHTML = '';
+    hitSvg.innerHTML = '';
 
     if (!state.schema) return;
 
@@ -947,12 +1602,24 @@
         rel.to_table_id, rel.to_column_id,
       );
       if (!anchors?.a || !anchors?.b) return;
-      drawRelationPair(svg, anchors.a.x, anchors.a.y, anchors.b.x, anchors.b.y, rel.id);
+      const pathOpts = anchors.selfRef
+        ? { selfRef: true, selfRefSide: anchors.selfRefSide }
+        : undefined;
+      drawRelationPair(
+        anchors.selfRef && linesSvgSelf ? linesSvgSelf : linesSvg,
+        hitSvg,
+        anchors.a.x,
+        anchors.a.y,
+        anchors.b.x,
+        anchors.b.y,
+        rel.id,
+        pathOpts,
+      );
     });
 
     if (state.linkDrag?.preview) {
       const p = state.linkDrag.preview;
-      drawPreviewPath(svg, p.x1, p.y1, p.x2, p.y2);
+      drawPreviewPath(linesSvg, p.x1, p.y1, p.x2, p.y2);
     }
   }
 
@@ -986,9 +1653,15 @@
     const hit = document.elementFromPoint(e.clientX, e.clientY)?.closest('.col-port');
     if (hit) {
       const toTable = +hit.dataset.tableId;
-      if (toTable === state.linkDrag.fromTableId) hit.classList.add('col-link-invalid');
+      const toCol = +hit.dataset.colId;
+      const sameCol = toTable === state.linkDrag.fromTableId && toCol === state.linkDrag.fromColumnId;
+      if (sameCol) hit.classList.add('col-link-invalid');
       else hit.classList.add('col-link-target');
-      state.linkDrag.hover = { tableId: toTable, columnId: +hit.dataset.colId, el: hit };
+      if (!sameCol) {
+        state.linkDrag.hover = { tableId: toTable, columnId: toCol, el: hit };
+      } else {
+        state.linkDrag.hover = null;
+      }
     } else {
       state.linkDrag.hover = null;
     }
@@ -1007,8 +1680,8 @@
     drawRelations();
 
     if (!hover) return;
-    if (hover.tableId === from.tableId) {
-      toast('Cannot link column to same table', 'error');
+    if (hover.tableId === from.tableId && hover.columnId === from.columnId) {
+      toast('Cannot link column to itself', 'error');
       return;
     }
     openRelationModal({
@@ -1027,15 +1700,17 @@
     indexRowH: 21,
     indexPad: 6,
     bottomPad: 8,
-    gapY: 44,
-    gapX: 96,
-    tableW: 260,
+    gapY: 36,
+    gapX: 120,
     componentGap: 72,
+    maxColumn: 4,
+    subColGap: 64,
+    barycenterSweeps: 10,
   };
 
   const CANVAS_TABLE = {
     minW: 200,
-    maxW: 280,
+    maxW: 320,
   };
 
   const EXPORT_TABLE = {
@@ -1081,18 +1756,25 @@
     return Math.ceil(Math.min(Math.max(maxW, minW), maxCap));
   }
 
-  function canvasTableWidth(table) {
-    const headerNeed = Math.ceil(measureTextWidth(table.name, 13, 'Segoe UI, sans-serif') + 72);
-    return Math.min(CANVAS_TABLE.maxW, Math.max(CANVAS_TABLE.minW, headerNeed));
+  function clampCanvasTableWidth(w) {
+    return Math.min(CANVAS_TABLE.maxW, Math.max(CANVAS_TABLE.minW, Math.round(w)));
   }
 
-  function exportTableWidth(table, styleKey, baseW) {
+  function canvasTableWidth(table) {
+    if (table?.width > 0) {
+      return clampCanvasTableWidth(table.width);
+    }
+    const headerNeed = Math.ceil(measureTextWidth(table.name, 13, 'Segoe UI, sans-serif') + 72);
+    return clampCanvasTableWidth(headerNeed);
+  }
+
+  function exportTableWidth(table, styleKey) {
     const headerFont = styleKey === 'minimal'
       ? 'Georgia, Times New Roman, serif'
       : 'Segoe UI, sans-serif';
     return estimateTableWidth(table, {
       headerFont,
-      minW: Math.max(baseW || 0, EXPORT_TABLE.minW),
+      minW: EXPORT_TABLE.minW,
       maxW: EXPORT_TABLE.maxW,
     });
   }
@@ -1107,6 +1789,116 @@
     return h;
   }
 
+  function layoutRelationsForLayering(relations) {
+    return relations.filter((r) => r.from_table_id !== r.to_table_id);
+  }
+
+  function assignLayoutLayers(tables, relations) {
+    const layer = new Map(tables.map((t) => [t.id, 0]));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      relations.forEach((rel) => {
+        const next = (layer.get(rel.to_table_id) || 0) + 1;
+        if (next > (layer.get(rel.from_table_id) || 0)) {
+          layer.set(rel.from_table_id, next);
+          changed = true;
+        }
+      });
+    }
+    const ranks = [...new Set(layer.values())].sort((a, b) => a - b);
+    const remap = new Map(ranks.map((v, i) => [v, i]));
+    tables.forEach((t) => layer.set(t.id, remap.get(layer.get(t.id)) ?? 0));
+    return layer;
+  }
+
+  function groupTablesByLayer(tables, layerMap) {
+    const layers = new Map();
+    tables.forEach((t) => {
+      const L = layerMap.get(t.id) || 0;
+      if (!layers.has(L)) layers.set(L, []);
+      layers.get(L).push(t);
+    });
+    layers.forEach((group) => group.sort((a, b) => a.name.localeCompare(b.name)));
+    return layers;
+  }
+
+  function layerNeighborBarycenter(tableId, relations, neighborIndex, mode) {
+    const edges = relations.filter((r) => (
+      mode === 'parents' ? r.from_table_id === tableId : r.to_table_id === tableId
+    ));
+    const coords = edges
+      .map((r) => neighborIndex.get(mode === 'parents' ? r.to_table_id : r.from_table_id))
+      .filter((v) => v !== undefined);
+    if (!coords.length) return Number.POSITIVE_INFINITY;
+    return coords.reduce((s, v) => s + v, 0) / coords.length;
+  }
+
+  function optimizeLayoutLayerOrder(layers, relations) {
+    const keys = [...layers.keys()].sort((a, b) => a - b);
+    for (let sweep = 0; sweep < LAYOUT.barycenterSweeps; sweep++) {
+      for (let i = 1; i < keys.length; i++) {
+        const group = layers.get(keys[i]);
+        const prev = layers.get(keys[i - 1]) || [];
+        const prevIndex = new Map(prev.map((t, idx) => [t.id, idx]));
+        group.sort((a, b) => {
+          const ba = layerNeighborBarycenter(a.id, relations, prevIndex, 'parents');
+          const bb = layerNeighborBarycenter(b.id, relations, prevIndex, 'parents');
+          return ba - bb || a.name.localeCompare(b.name);
+        });
+      }
+      for (let i = keys.length - 2; i >= 0; i--) {
+        const group = layers.get(keys[i]);
+        const next = layers.get(keys[i + 1]) || [];
+        const nextIndex = new Map(next.map((t, idx) => [t.id, idx]));
+        group.sort((a, b) => {
+          const ba = layerNeighborBarycenter(a.id, relations, nextIndex, 'children');
+          const bb = layerNeighborBarycenter(b.id, relations, nextIndex, 'children');
+          return ba - bb || a.name.localeCompare(b.name);
+        });
+      }
+    }
+  }
+
+  function splitLayerGroups(group, maxPerColumn) {
+    if (group.length <= maxPerColumn) return [group];
+    const chunks = [];
+    for (let i = 0; i < group.length; i += maxPerColumn) {
+      chunks.push(group.slice(i, i + maxPerColumn));
+    }
+    return chunks;
+  }
+
+  function desiredTableY(table, relations, positions, tableById, tableHeightFn) {
+    const parents = layoutRelationsForLayering(relations)
+      .filter((r) => r.from_table_id === table.id)
+      .map((r) => tableById.get(r.to_table_id))
+      .filter(Boolean);
+    if (!parents.length) return null;
+    const centers = parents
+      .map((p) => {
+        const pos = positions.get(p.id);
+        if (!pos) return null;
+        return pos.y + tableHeightFn(p) / 2;
+      })
+      .filter((v) => v != null);
+    if (!centers.length) return null;
+    const avg = centers.reduce((s, v) => s + v, 0) / centers.length;
+    return avg - tableHeightFn(table) / 2;
+  }
+
+  function placeTableColumn(group, x, positions, relations, tableById, opts) {
+    const { tableHeight, gapY, startY } = opts;
+    let cursor = startY;
+    group.forEach((t) => {
+      const aligned = desiredTableY(t, relations, positions, tableById, tableHeight);
+      let y = aligned == null ? cursor : Math.max(startY, aligned);
+      if (y < cursor) y = cursor;
+      positions.set(t.id, { x, y });
+      cursor = y + tableHeight(t) + gapY;
+    });
+  }
+
   function layoutComponent(tables, relations, opts = {}) {
     const tableWidth = opts.tableWidth || canvasTableWidth;
     const tableHeight = opts.tableHeight || estimateTableHeight;
@@ -1114,58 +1906,77 @@
     const GAP_Y = opts.gapY ?? LAYOUT.gapY;
     const START_X = opts.startX ?? 48;
     const START_Y = opts.startY ?? 0;
-    const layer = new Map();
-    tables.forEach((t) => layer.set(t.id, 0));
+    const layoutRelations = layoutRelationsForLayering(relations);
+    const tableById = new Map(tables.map((t) => [t.id, t]));
+    const layerMap = assignLayoutLayers(tables, layoutRelations);
+    const layers = groupTablesByLayer(tables, layerMap);
+    optimizeLayoutLayerOrder(layers, layoutRelations);
 
-    for (let pass = 0; pass < tables.length; pass++) {
-      relations.forEach((rel) => {
-        const from = rel.from_table_id;
-        const to = rel.to_table_id;
-        const next = (layer.get(to) || 0) + 1;
-        if (next > (layer.get(from) || 0)) layer.set(from, next);
-      });
-    }
-
-    const layers = new Map();
-    tables.forEach((t) => {
-      const L = layer.get(t.id) || 0;
-      if (!layers.has(L)) layers.set(L, []);
-      layers.get(L).push(t);
-    });
-
-    const TABLE_W = LAYOUT.tableW;
     const positions = new Map();
     const sortedLayers = [...layers.keys()].sort((a, b) => a - b);
     let layerX = START_X;
+    const placeOpts = { tableHeight, gapY: GAP_Y, startY: START_Y };
 
     sortedLayers.forEach((L) => {
-      let group = [...layers.get(L)];
-      if (L > 0) {
-        group.sort((a, b) => {
-          const avgTargetY = (tableId) => {
-            const targets = relations
-              .filter((r) => r.from_table_id === tableId)
-              .map((r) => positions.get(r.to_table_id)?.y ?? 0);
-            if (!targets.length) return 0;
-            return targets.reduce((s, v) => s + v, 0) / targets.length;
-          };
-          return avgTargetY(a.id) - avgTargetY(b.id) || a.name.localeCompare(b.name);
-        });
-      } else {
-        group.sort((a, b) => a.name.localeCompare(b.name));
-      }
+      const group = layers.get(L) || [];
+      const chunks = splitLayerGroups(group, opts.maxColumn ?? LAYOUT.maxColumn);
+      let chunkX = layerX;
+      let blockRight = layerX;
 
-      const layerMaxW = Math.max(TABLE_W, ...group.map((t) => tableWidth(t)));
-      const x = layerX;
-      let y = START_Y;
-      group.forEach((t) => {
-        positions.set(t.id, { x, y });
-        y += tableHeight(t) + GAP_Y;
+      chunks.forEach((chunk) => {
+        const colW = Math.max(CANVAS_TABLE.minW, ...chunk.map((t) => tableWidth(t)));
+        placeTableColumn(chunk, chunkX, positions, layoutRelations, tableById, placeOpts);
+        blockRight = chunkX + colW;
+        chunkX += colW + LAYOUT.subColGap;
       });
-      layerX += layerMaxW + GAP_X;
+
+      layerX = blockRight + GAP_X;
     });
 
     return positions;
+  }
+
+  function refineLayoutColumns(positions, schema, opts = {}) {
+    const resolveWidth = opts.tableWidth || canvasTableWidth;
+    const gapX = opts.gapX ?? LAYOUT.gapX;
+
+    const nodes = (schema?.tables || []).map((table) => {
+      const pos = positions.get(table.id);
+      if (!pos) return null;
+      return {
+        id: table.id,
+        x: pos.x,
+        y: pos.y,
+        w: resolveWidth(table),
+      };
+    }).filter(Boolean);
+    if (!nodes.length) return;
+
+    const xBucket = (x) => Math.round(x / 40) * 40;
+    const colGroups = new Map();
+    nodes.forEach((n) => {
+      const key = xBucket(n.x);
+      if (!colGroups.has(key)) colGroups.set(key, []);
+      colGroups.get(key).push(n);
+    });
+
+    const sortedKeys = [...colGroups.keys()].sort((a, b) => a - b);
+    let prevRight = -Infinity;
+
+    sortedKeys.forEach((key) => {
+      const group = colGroups.get(key);
+      const colX = Math.min(...group.map((n) => n.x));
+      const colMaxW = Math.max(...group.map((n) => n.w));
+      let newX = colX;
+      if (prevRight > -Infinity && newX < prevRight + gapX) {
+        newX = prevRight + gapX;
+      }
+      group.forEach((n) => {
+        n.x = newX;
+        positions.set(n.id, { x: n.x, y: n.y });
+      });
+      prevRight = newX + colMaxW;
+    });
   }
 
   function findTableComponents(tables, relations) {
@@ -1218,6 +2029,9 @@
 
       offsetY = blockMaxY + COMPONENT_GAP;
     });
+
+    refinePositionsByLayer(positions, schema, tableHeight);
+    refineLayoutColumns(positions, schema, opts);
 
     return positions;
   }
@@ -1298,6 +2112,7 @@
 
     const positions = new Map();
     const heights = new Map();
+    const widths = new Map();
     canvas.querySelectorAll('.table-node').forEach((node) => {
       const id = +node.dataset.id;
       const table = state.schema.tables.find((t) => t.id === id);
@@ -1307,14 +2122,19 @@
         y: parseFloat(node.style.top) || 0,
       });
       heights.set(id, node.offsetHeight || estimateTableHeight(table));
+      widths.set(id, node.offsetWidth || canvasTableWidth(table));
     });
 
     refinePositionsByLayer(positions, state.schema, (table) => heights.get(table.id) || estimateTableHeight(table));
+    refineLayoutColumns(positions, state.schema, {
+      tableWidth: (table) => widths.get(table.id) || canvasTableWidth(table),
+    });
 
     positions.forEach((pos, id) => {
       const node = canvas.querySelector(`.table-node[data-id="${id}"]`);
       const table = state.schema.tables.find((t) => t.id === id);
       if (!node || !table) return;
+      node.style.left = `${pos.x}px`;
       node.style.top = `${pos.y}px`;
       table.pos_x = pos.x;
       table.pos_y = pos.y;
@@ -1368,34 +2188,18 @@
 
     const entries = canvasLayout.tables.map((entry) => ({
       ...entry,
-      exportW: exportTableWidth(entry.table, styleKey, entry.w),
+      exportW: exportTableWidth(entry.table, styleKey),
     }));
-
-    const syncExportTableAnchors = (entry) => {
-      const left = entry.x;
-      const right = entry.x + entry.exportW;
-      entry.columns.forEach((c) => {
-        c.anchorLeft = left;
-        c.anchorRight = right;
-      });
-    };
 
     const shiftEntryX = (entry, newX) => {
       if (newX === entry.x) return;
       entry.x = newX;
-      syncExportTableAnchors(entry);
     };
 
     const shiftEntryY = (entry, newY) => {
-      const deltaY = newY - entry.y;
-      if (!deltaY) return;
+      if (newY === entry.y) return;
       entry.y = newY;
-      entry.columns.forEach((c) => {
-        c.anchorY += deltaY;
-      });
     };
-
-    entries.forEach((entry) => syncExportTableAnchors(entry));
 
     const xBucket = (x) => Math.round(x / 40) * 40;
     const colGroups = new Map();
@@ -1435,8 +2239,6 @@
         cursor = e.y + e.h;
       });
     });
-
-    entries.forEach((entry) => syncExportTableAnchors(entry));
 
     let minX = Infinity;
     let minY = Infinity;
@@ -1500,9 +2302,6 @@
           col,
           rowY: lr.top - y,
           rowH: lr.height,
-          anchorLeft: lr.left,
-          anchorRight: lr.left + lr.width,
-          anchorY: lr.top + lr.height / 2,
         });
       });
 
@@ -1567,8 +2366,8 @@
     return idxData;
   }
 
-  function computeExportTableWidth(table, columns, idxData, baseW, styleKey) {
-    return exportTableWidth(table, styleKey, baseW);
+  function computeExportTableWidth(table, columns, idxData, styleKey) {
+    return exportTableWidth(table, styleKey);
   }
 
   function buildDiagramSvg(layout, styleKey) {
@@ -1578,41 +2377,76 @@
     const totalH = height + titleOffset;
     const projectName = state.schema?.project?.name || 'Database Schema';
 
-    function exportRelationAnchors(fromColId, toColId) {
+    function exportColumnPorts(entry, col) {
+      const w = entry.exportW || entry.w;
+      return {
+        left: entry.x,
+        right: entry.x + w,
+        y: entry.y + col.rowY + col.rowH / 2,
+      };
+    }
+
+    function exportRelationAnchors(rel) {
+      let fromEntry;
       let fromCol;
+      let toEntry;
       let toCol;
-      tables.forEach((t) => {
-        t.columns.forEach((c) => {
-          if (c.col?.id === fromColId) fromCol = c;
-          if (c.col?.id === toColId) toCol = c;
+      exportTables.forEach((entry) => {
+        entry.columns.forEach((c) => {
+          if (c.col?.id === rel.from_column_id) {
+            fromEntry = entry;
+            fromCol = c;
+          }
+          if (c.col?.id === rel.to_column_id) {
+            toEntry = entry;
+            toCol = c;
+          }
         });
       });
-      if (!fromCol || !toCol) return null;
-      const fromCx = (fromCol.anchorLeft + fromCol.anchorRight) / 2;
-      const toCx = (toCol.anchorLeft + toCol.anchorRight) / 2;
-      if (fromCx <= toCx) {
-        return {
-          a: { x: fromCol.anchorRight - ox, y: fromCol.anchorY - oy + titleOffset },
-          b: { x: toCol.anchorLeft - ox, y: toCol.anchorY - oy + titleOffset },
-        };
-      }
+      if (!fromEntry || !fromCol || !toEntry || !toCol) return null;
+
+      const selfRef = rel.from_table_id === rel.to_table_id;
+      const endpoints = relationEndpointsFromPorts(
+        exportColumnPorts(fromEntry, fromCol),
+        exportColumnPorts(toEntry, toCol),
+        { selfRef },
+      );
+      const titleShift = titleOffset;
       return {
-        a: { x: fromCol.anchorLeft - ox, y: fromCol.anchorY - oy + titleOffset },
-        b: { x: toCol.anchorRight - ox, y: toCol.anchorY - oy + titleOffset },
+        selfRef,
+        selfRefSide: endpoints.selfRefSide,
+        a: { x: endpoints.a.x - ox, y: endpoints.a.y - oy + titleShift },
+        b: { x: endpoints.b.x - ox, y: endpoints.b.y - oy + titleShift },
       };
+    }
+
+    function exportRelationPath(rel) {
+      const anchors = exportRelationAnchors(rel);
+      if (!anchors) return '';
+      const pathOpts = anchors.selfRef
+        ? { selfRef: true, selfRefSide: anchors.selfRefSide }
+        : undefined;
+      return relationPathSvg(
+        anchors.a.x, anchors.a.y, anchors.b.x, anchors.b.y,
+        theme.relStroke, theme.relWidth, theme.arrowFill,
+        0.95,
+        pathOpts,
+      );
     }
 
     const parts = [];
 
     const exportTables = tables.map((entry) => {
       const idxData = resolveIdxExportData(entry.table, entry.columns, entry.headerH, entry.idxSection);
-      const exportW = entry.exportW || computeExportTableWidth(entry.table, entry.columns, idxData, entry.w, styleKey);
+      const exportW = entry.exportW || computeExportTableWidth(entry.table, entry.columns, idxData, styleKey);
       return { ...entry, idxData, exportW };
     });
 
     let layoutWidth = width;
+    const hasSelfRef = relations.some((r) => r.from_table_id === r.to_table_id);
+    const selfRefPad = hasSelfRef ? SELF_REF_LOOP_OUT + SELF_REF_ARROW + 8 : 0;
     exportTables.forEach(({ x, exportW }) => {
-      layoutWidth = Math.max(layoutWidth, x - ox + exportW + 40);
+      layoutWidth = Math.max(layoutWidth, x - ox + exportW + 40 + selfRefPad);
     });
 
     parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${layoutWidth}" height="${totalH}" viewBox="0 0 ${layoutWidth} ${totalH}">`);
@@ -1631,6 +2465,11 @@
       parts.push(`<text x="${layoutWidth / 2}" y="44" text-anchor="middle" fill="${theme.textMuted}" font-family="Segoe UI, system-ui, sans-serif" font-size="11">Entity Relationship Diagram</text>`);
       parts.push(`<line x1="32" y1="52" x2="${layoutWidth - 32}" y2="52" stroke="#cccccc" stroke-width="1"/>`);
     }
+
+    relations.forEach((rel) => {
+      if (rel.from_table_id === rel.to_table_id) return;
+      parts.push(exportRelationPath(rel));
+    });
 
     exportTables.forEach(({ table, x, y, h, headerH, columns, idxData, exportW }) => {
       const tx = x - ox;
@@ -1698,12 +2537,8 @@
     });
 
     relations.forEach((rel) => {
-      const anchors = exportRelationAnchors(rel.from_column_id, rel.to_column_id);
-      if (!anchors) return;
-      parts.push(relationPathSvg(
-        anchors.a.x, anchors.a.y, anchors.b.x, anchors.b.y,
-        theme.relStroke, theme.relWidth, theme.arrowFill,
-      ));
+      if (rel.from_table_id !== rel.to_table_id) return;
+      parts.push(exportRelationPath(rel));
     });
 
     parts.push('</svg>');
@@ -3119,7 +3954,10 @@
 
   async function init() {
     initSqlPanel();
+    initSqlEditor();
     bindCanvasSelection();
+    initCanvasPan();
+    initCanvasZoom();
     setDesignerEnabled(false);
     rotateProjectsTagline();
     try {

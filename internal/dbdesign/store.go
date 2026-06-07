@@ -213,7 +213,7 @@ func defaultPKType(dialect string) string {
 	}
 }
 
-func (s *Store) UpdateTable(id uint, name string, posX, posY *float64) (*Table, error) {
+func (s *Store) UpdateTable(id uint, name string, posX, posY, width *float64) (*Table, error) {
 	var t Table
 	if err := s.db.First(&t, id).Error; err != nil {
 		return nil, ErrNotFound
@@ -227,10 +227,27 @@ func (s *Store) UpdateTable(id uint, name string, posX, posY *float64) (*Table, 
 	if posY != nil {
 		t.PosY = *posY
 	}
+	if width != nil {
+		t.Width = clampCanvasTableWidth(*width)
+	}
 	if err := s.db.Save(&t).Error; err != nil {
 		return nil, err
 	}
 	return &t, nil
+}
+
+func clampCanvasTableWidth(w float64) float64 {
+	if w <= 0 {
+		return 0
+	}
+	const minW, maxW = 200, 320
+	if w < minW {
+		return minW
+	}
+	if w > maxW {
+		return maxW
+	}
+	return w
 }
 
 func (s *Store) DeleteTable(id uint) error {
@@ -513,7 +530,13 @@ func (s *Store) ImportSQL(projectID uint, sql string, replace bool) (*ImportResu
 	result := &ImportResult{}
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		st := &Store{db: tx}
+		var layouts map[string]tableLayoutSnapshot
 		if replace {
+			var err error
+			layouts, err = st.snapshotTableLayouts(projectID)
+			if err != nil {
+				return err
+			}
 			var tables []Table
 			if err := tx.Where("project_id = ?", projectID).Find(&tables).Error; err != nil {
 				return err
@@ -527,11 +550,16 @@ func (s *Store) ImportSQL(projectID uint, sql string, replace bool) (*ImportResu
 
 		tableMap := make(map[string]uint)  // name -> table id
 		columnMap := make(map[string]uint) // table.col -> column id
+		newTableIdx := 0
 
 		for i, pt := range parsed {
-			posX := float64(40 + (i%4)*280)
-			posY := float64(40 + (i/4)*220)
-			t := &Table{ProjectID: projectID, Name: pt.Name, PosX: posX, PosY: posY}
+			posX, posY, width := importTableLayout(pt.Name, i, newTableIdx, layouts)
+			if replace && layouts != nil {
+				if _, ok := layouts[strings.ToLower(pt.Name)]; !ok {
+					newTableIdx++
+				}
+			}
+			t := &Table{ProjectID: projectID, Name: pt.Name, PosX: posX, PosY: posY, Width: width}
 			if err := tx.Create(t).Error; err != nil {
 				return err
 			}
@@ -621,4 +649,42 @@ func fkName(fk parsedForeignKey) string {
 		return fk.Name
 	}
 	return DefaultFKName(fk.FromTable, fk.FromColumn)
+}
+
+type tableLayoutSnapshot struct {
+	PosX  float64
+	PosY  float64
+	Width float64
+}
+
+func (s *Store) snapshotTableLayouts(projectID uint) (map[string]tableLayoutSnapshot, error) {
+	var tables []Table
+	if err := s.db.Where("project_id = ?", projectID).Find(&tables).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[string]tableLayoutSnapshot, len(tables))
+	for _, t := range tables {
+		out[strings.ToLower(t.Name)] = tableLayoutSnapshot{
+			PosX:  t.PosX,
+			PosY:  t.PosY,
+			Width: t.Width,
+		}
+	}
+	return out, nil
+}
+
+func importTableLayout(name string, parsedIndex, newTableIndex int, layouts map[string]tableLayoutSnapshot) (posX, posY, width float64) {
+	if layouts != nil {
+		if saved, ok := layouts[strings.ToLower(name)]; ok {
+			return saved.PosX, saved.PosY, saved.Width
+		}
+		posX, posY = defaultGridTablePosition(newTableIndex)
+		return posX, posY, 0
+	}
+	posX, posY = defaultGridTablePosition(parsedIndex)
+	return posX, posY, 0
+}
+
+func defaultGridTablePosition(index int) (posX, posY float64) {
+	return float64(40 + (index%4)*280), float64(40 + (index/4)*220)
 }

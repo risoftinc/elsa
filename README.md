@@ -50,11 +50,12 @@
 - **Module Management**: Automatic go.mod module name creation
 
 ### 🗄️ DB Designer (Local)
-- **Drag-and-drop canvas**: Design tables visually with PK/FK badges, indexes, and data types
-- **Projects**: Separate workspaces per schema (MySQL, PostgreSQL, SQLite)
-- **Relations**: FK lines with editable constraint name and ON DELETE / ON UPDATE actions
+- **Drag-and-drop canvas**: Design tables visually with PK/FK/AI badges, indexes, and resizable table width (200–320 px)
+- **Projects**: Separate workspaces per schema (MySQL, PostgreSQL, SQLite) with dialect-aware export
+- **Relations**: Bezier FK lines (including self-referencing tables); edit constraint name and ON DELETE / ON UPDATE
 - **Indexes**: Composite and unique indexes per table, included in SQL import/export
-- **Bidirectional SQL**: Live SQL panel; paste or edit SQL to update the diagram
+- **Bidirectional SQL**: Live SQL panel with validation, format-on-blur, and comment-aware re-import
+- **Canvas tools**: Ctrl+drag to pan, Ctrl+wheel to zoom (25%–250%), auto layout for large schemas
 - **Diagram export**: Preview then download PNG/SVG (dark or print-friendly layout)
 - **Embedded UI**: Same dark theme as Env Manager, single binary
 
@@ -159,14 +160,14 @@ elsa make repository health/health_repository
 elsa make list
 ```
 
-### 5. DB Designer
+### 6. DB Designer
 ```bash
 elsa dbdesign serve
 ```
 
 See [DB Designer Guide](DBDESIGN_GUIDELINE.md).
 
-### 6. Env Manager
+### 7. Env Manager
 ```bash
 # Start local env manager (opens browser automatically)
 elsa env serve
@@ -177,7 +178,7 @@ elsa env serve --port 8080 --no-browser
 
 See [Env Manager Guide](ENV_GUIDELINE.md) for environments, variables, templates, and export.
 
-### 7. Custom Commands
+### 8. Custom Commands
 ```bash
 # List available commands from Elsafile
 elsa list
@@ -282,7 +283,9 @@ Run: `elsa generate` to create `elsa_gen.go` with automatic dependency injection
 | Command | Description |
 |---------|-------------|
 | `elsa dbdesign serve` | Start visual schema designer web UI |
-| `--host`, `--port`, `--db`, `--no-browser` | Same pattern as env manager (default port `1998`) |
+| `--host`, `--port`, `--db`, `--no-browser` | Bind address, port (default `1998`), SQLite path, skip browser |
+
+Features: canvas pan/zoom, table width resize, indexes, self-referencing FKs, SQL validate/format, diagram PNG/SVG export. See [DB Designer Guide](DBDESIGN_GUIDELINE.md).
 
 ### Env Manager Commands
 | Command | Description |
@@ -504,7 +507,7 @@ go build -o elsa ./cmd/elsa
   - Dependency definition
   - Advanced examples
   - Troubleshooting and best practices
-- **[DB Designer Guide](DBDESIGN_GUIDELINE.md)** - Visual schema designer: tables, indexes, FK constraints, SQL sync, diagram export
+- **[DB Designer Guide](DBDESIGN_GUIDELINE.md)** - Visual schema designer: tables, indexes, self-FK, SQL sync/validate/format, pan/zoom canvas, diagram export
 - **[Env Manager Guide](ENV_GUIDELINE.md)** - Local environment variable manager
   - Environment groups, variables, and templates
   - Comparison table, export, and Go template syntax

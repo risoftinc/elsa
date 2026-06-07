@@ -50,7 +50,7 @@
             <button type="button" class="btn small" id="btnExportDiagram" disabled>Export diagram</button>
             <select id="exportImageStyle" class="toolbar-select" disabled title="Diagram style">
               <option value="dark">Dark</option>
-              <option value="minimal">Minimal (print)</option>
+              <option value="minimal">Minimal</option>
             </select>
             <select id="exportImageFormat" class="toolbar-select" disabled title="Diagram format">
               <option value="png">PNG</option>
@@ -73,13 +73,28 @@
               <span>SQL</span>
               <span id="sqlPanelStatus" class="sql-panel-status"></span>
             </div>
-            <textarea id="sqlEditor" class="sql-editor" spellcheck="false" placeholder="-- SQL updates live with the diagram&#10;-- Edit here to update the canvas"></textarea>
+            <div class="sql-editor-shell" id="sqlEditorShell">
+              <pre class="sql-highlight" id="sqlEditorHighlight" aria-hidden="true"><code></code></pre>
+              <textarea id="sqlEditor" class="sql-editor" spellcheck="false" placeholder="-- SQL updates live with the diagram&#10;-- Edit here to update the canvas"></textarea>
+            </div>
           </div>
           <div class="canvas-area">
+            <div class="canvas-zoom-controls" id="canvasZoomControls" hidden>
+              <button type="button" class="btn small icon canvas-zoom-btn" id="btnCanvasZoomOut" disabled title="Zoom out">−</button>
+              <span id="canvasZoomLabel" class="canvas-zoom-label">100%</span>
+              <button type="button" class="btn small icon canvas-zoom-btn" id="btnCanvasZoomIn" disabled title="Zoom in">+</button>
+              <button type="button" class="btn small icon canvas-zoom-btn" id="btnCanvasZoomReset" disabled title="Reset zoom">⟲</button>
+            </div>
             <div class="canvas-scroll" id="canvasScroll">
-              <svg id="relationSvg" class="relation-svg"></svg>
-              <div id="canvas" class="canvas"></div>
-              <div class="canvas-empty" id="canvasEmpty">Select or create a project to start designing.</div>
+              <div class="canvas-zoom-shell" id="canvasZoomShell">
+                <div class="canvas-stage" id="canvasStage">
+                  <svg id="relationSvg" class="relation-svg relation-svg-lines" aria-hidden="true"></svg>
+                  <div id="canvas" class="canvas"></div>
+                  <svg id="relationSvgSelf" class="relation-svg relation-svg-self" aria-hidden="true"></svg>
+                  <svg id="relationSvgHit" class="relation-svg relation-svg-hit" aria-hidden="true"></svg>
+                  <div class="canvas-empty" id="canvasEmpty">Select or create a project to start designing.</div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
