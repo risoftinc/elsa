@@ -53,6 +53,8 @@
       fkFill: '#a371f733',
       uqText: '#58a6ff',
       uqFill: '#58a6ff33',
+      aiText: '#3fb950',
+      aiFill: '#3fb95033',
       idxText: '#3fb950',
       idxFill: '#3fb95033',
       idxUqText: '#a371f7',
@@ -79,6 +81,8 @@
       fkFill: '#eeeeee',
       uqText: '#111111',
       uqFill: '#eeeeee',
+      aiText: '#111111',
+      aiFill: '#eeeeee',
       idxText: '#111111',
       idxFill: '#eeeeee',
       idxUqText: '#111111',
@@ -619,6 +623,7 @@
       if (c.is_primary_key) badges += '<span class="badge-pk">PK</span>';
       if (c.is_foreign_key) badges += '<span class="badge-fk">FK</span>';
       if (c.is_unique && !c.is_primary_key) badges += '<span class="badge-uq">UQ</span>';
+      if (c.is_auto_increment) badges += '<span class="badge-ai">AI</span>';
       const typeLabel = formatDataTypeDisplay(c.data_type);
       const tip = `${c.name} — ${c.data_type}\nDrag column to link FK → PK`;
       return `<li class="col-port" data-col-id="${c.id}" data-table-id="${t.id}" title="${esc(tip)}">${badges}<span class="col-name" title="${esc(c.name)}">${esc(c.name)}</span><span class="col-type">${esc(typeLabel)}</span></li>`;
@@ -1060,6 +1065,7 @@
       if (col.is_primary_key) badges += 26;
       if (col.is_foreign_key) badges += 26;
       if (col.is_unique && !col.is_primary_key) badges += 26;
+      if (col.is_auto_increment) badges += 26;
       maxW = Math.max(
         maxW,
         12 + badges + measureTextWidth(col.name, 11, mono) + measureTextWidth(formatDataTypeDisplay(col.data_type), 10, mono) + 24,
@@ -1658,6 +1664,7 @@
         if (col.is_primary_key) cx = drawBadge(rowTop, midY, cx, 'PK', theme.pkFill, theme.pkText);
         if (col.is_foreign_key) cx = drawBadge(rowTop, midY, cx, 'FK', theme.fkFill, theme.fkText);
         if (col.is_unique && !col.is_primary_key) cx = drawBadge(rowTop, midY, cx, 'UQ', theme.uqFill, theme.uqText);
+        if (col.is_auto_increment) cx = drawBadge(rowTop, midY, cx, 'AI', theme.aiFill, theme.aiText);
         const colFont = 'Consolas, monospace';
         parts.push(`<text x="${cx}" y="${midY}" fill="${theme.text}" font-family="${colFont}" font-size="11">${escXml(col.name)}</text>`);
         const typeLabel = formatDataTypeDisplay(col.data_type);
@@ -2554,6 +2561,40 @@
     }
 
     renderDefaultControl(row);
+    updateAutoIncrementUI(row);
+  }
+
+  function rowSupportsAutoIncrement(row) {
+    const kind = row.querySelector('.c-kind')?.value || 'varchar';
+    if (['int', 'bigint', 'smallint', 'tinyint'].includes(kind)) return true;
+    if (kind === 'custom') {
+      const dt = (row.querySelector('.c-custom-type')?.value || '').toUpperCase();
+      return /\b(INT|INTEGER|BIGINT|SMALLINT|TINYINT|SERIAL|BIGSERIAL|SMALLSERIAL)\b/.test(dt);
+    }
+    return false;
+  }
+
+  function updateAutoIncrementUI(row) {
+    const ai = row?.querySelector('.c-ai');
+    if (!ai) return;
+    const ok = rowSupportsAutoIncrement(row);
+    ai.disabled = !ok;
+    if (!ok) ai.checked = false;
+  }
+
+  function setColumnRowAutoIncrement(row, enabled) {
+    const ai = row?.querySelector('.c-ai');
+    if (!ai || ai.disabled) return;
+    ai.checked = !!enabled;
+  }
+
+  function syncAutoIncrementSelection(activeRow) {
+    const container = $('#columnEditor');
+    if (!container || !activeRow?.querySelector('.c-ai')?.checked) return;
+    container.querySelectorAll('.col-row').forEach((other) => {
+      if (other === activeRow) return;
+      setColumnRowAutoIncrement(other, false);
+    });
   }
 
   function setColumnRowPrimaryKey(row, enabled) {
@@ -2585,11 +2626,18 @@
         openEnumModal(row);
       }
     });
+    row.querySelector('.c-custom-type')?.addEventListener('input', () => updateAutoIncrementUI(row));
     row.querySelector('.c-pk')?.addEventListener('change', () => {
       if (row.querySelector('.c-pk')?.checked) {
         syncPrimaryKeySelection(row);
       }
       setColumnRowPrimaryKey(row, !!row.querySelector('.c-pk')?.checked);
+    });
+    row.querySelector('.c-ai')?.addEventListener('change', () => {
+      if (row.querySelector('.c-ai')?.checked) {
+        syncAutoIncrementSelection(row);
+      }
+      setColumnRowAutoIncrement(row, !!row.querySelector('.c-ai')?.checked);
     });
     row.querySelector('.c-enum-manage')?.addEventListener('click', () => openEnumModal(row));
     updateColumnTypeUI(row);
@@ -2612,6 +2660,7 @@
           <div class="c-default-wrap" data-default-value="${esc(defaultVal)}"></div>
           <div class="col-flags">
             <label title="Primary key (one per table)"><input type="checkbox" class="c-pk" ${c.is_primary_key ? 'checked' : ''}> PK</label>
+            <label title="Auto increment (one per table, integer types)"><input type="checkbox" class="c-ai" ${c.is_auto_increment ? 'checked' : ''}> AI</label>
             <label><input type="checkbox" class="c-fk" ${c.is_foreign_key ? 'checked' : ''}> FK</label>
             <label><input type="checkbox" class="c-unique" ${c.is_unique && !c.is_primary_key ? 'checked' : ''} ${c.is_primary_key ? 'disabled' : ''}> UQ</label>
             <label><input type="checkbox" class="c-null" ${c.is_nullable ? 'checked' : ''}> Null</label>
@@ -2879,11 +2928,16 @@
     const box = $('#columnEditor');
     const cols = [...(t.columns || [])].sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
     let pkAssigned = false;
+    let aiAssigned = false;
     const rows = cols.map((c) => {
       const col = { ...c };
       if (col.is_primary_key) {
         if (pkAssigned) col.is_primary_key = false;
         else pkAssigned = true;
+      }
+      if (col.is_auto_increment) {
+        if (aiAssigned) col.is_auto_increment = false;
+        else aiAssigned = true;
       }
       return columnRowHTML(col);
     }).join('');
@@ -2937,6 +2991,10 @@
   $('#btnSaveTable')?.addEventListener('click', async () => {
     const rows = [...$('#columnEditor').querySelectorAll('.col-row')];
     const pkRow = rows.find((row) => row.querySelector('.c-pk')?.checked) || null;
+    const aiRow = rows.find((row) => {
+      const ai = row.querySelector('.c-ai');
+      return ai?.checked && !ai.disabled;
+    }) || null;
     try {
       await api(`/api/tables/${state.editingTableId}`, {
         method: 'PUT',
@@ -2955,6 +3013,7 @@
           name: row.querySelector('.c-name').value.trim(),
           data_type: readColumnTypeFromRow(row),
           is_primary_key: isPrimaryKey,
+          is_auto_increment: row === aiRow,
           is_foreign_key: row.querySelector('.c-fk').checked,
           is_nullable: row.querySelector('.c-null').checked,
           is_unique: !!(row.querySelector('.c-unique')?.checked && !isPrimaryKey),

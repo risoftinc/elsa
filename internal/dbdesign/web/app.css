@@ -344,7 +344,7 @@ label input, label select { margin-top: 0.35rem; width: 100%; }
   }
 }
 
-.badge-pk, .badge-fk, .badge-uq {
+.badge-pk, .badge-fk, .badge-uq, .badge-ai {
   font-size: 0.65rem;
   font-weight: 700;
   padding: 0.1rem 0.35rem;
@@ -355,6 +355,7 @@ label input, label select { margin-top: 0.35rem; width: 100%; }
 .badge-pk { background: #f0883e33; color: #f0883e; }
 .badge-fk { background: #a371f733; color: #a371f7; }
 .badge-uq { background: #58a6ff33; color: #58a6ff; }
+.badge-ai { background: #3fb95033; color: #3fb950; }
 
 .idx-section {
   border-top: 1px dashed var(--border);
@@ -408,18 +409,6 @@ label input, label select { margin-top: 0.35rem; width: 100%; }
 }
 
 .col-list li:hover { background: rgba(88, 166, 255, 0.08); }
-  margin-top: 1rem;
-  padding: 1rem;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-family: var(--mono);
-  font-size: 0.8rem;
-  white-space: pre-wrap;
-  max-height: 60vh;
-  overflow: auto;
-  min-height: 120px;
-}
 
 .relation-summary {
   margin: 0 0 1rem;
@@ -660,7 +649,7 @@ label input, label select { margin-top: 0.35rem; width: 100%; }
 .col-editor-header,
 .col-row-cells {
   display: grid;
-  grid-template-columns: 26px minmax(128px, 1.25fr) minmax(124px, 1fr) 60px minmax(100px, 1fr) minmax(188px, auto) 34px;
+  grid-template-columns: 26px minmax(128px, 1.25fr) minmax(124px, 1fr) 60px minmax(100px, 1fr) minmax(248px, auto) 34px;
   gap: 0.5rem;
   align-items: center;
   padding: 0.45rem 0.65rem;

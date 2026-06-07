@@ -31,16 +31,17 @@ type Table struct {
 
 // Column belongs to a table
 type Column struct {
-	ID           uint   `json:"id" gorm:"primaryKey"`
-	TableID      uint   `json:"table_id" gorm:"not null;index"`
-	Name         string `json:"name" gorm:"not null"`
-	DataType     string `json:"data_type" gorm:"not null"`
-	IsPrimaryKey bool   `json:"is_primary_key"`
-	IsForeignKey bool   `json:"is_foreign_key"`
-	IsNullable   bool   `json:"is_nullable"`
-	IsUnique     bool   `json:"is_unique"`
-	DefaultValue string `json:"default_value"`
-	SortOrder    int    `json:"sort_order"`
+	ID              uint   `json:"id" gorm:"primaryKey"`
+	TableID         uint   `json:"table_id" gorm:"not null;index"`
+	Name            string `json:"name" gorm:"not null"`
+	DataType        string `json:"data_type" gorm:"not null"`
+	IsPrimaryKey    bool   `json:"is_primary_key"`
+	IsForeignKey    bool   `json:"is_foreign_key"`
+	IsAutoIncrement bool   `json:"is_auto_increment"`
+	IsNullable      bool   `json:"is_nullable"`
+	IsUnique        bool   `json:"is_unique"`
+	DefaultValue    string `json:"default_value"`
+	SortOrder       int    `json:"sort_order"`
 }
 
 // Relation links FK column to PK column

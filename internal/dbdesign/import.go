@@ -21,12 +21,13 @@ type parsedIndex struct {
 }
 
 type parsedColumn struct {
-	Name         string
-	DataType     string
-	IsPrimaryKey bool
-	IsNullable   bool
-	IsUnique     bool
-	DefaultValue string
+	Name            string
+	DataType        string
+	IsPrimaryKey    bool
+	IsAutoIncrement bool
+	IsNullable      bool
+	IsUnique        bool
+	DefaultValue    string
 }
 
 type parsedForeignKey struct {
@@ -295,6 +296,9 @@ func parseColumnLine(line string) parsedColumn {
 	if strings.Contains(upper, " UNIQUE") || strings.HasPrefix(upper, "UNIQUE ") {
 		col.IsUnique = true
 	}
+	if strings.Contains(upper, "AUTO_INCREMENT") || strings.Contains(upper, "AUTOINCREMENT") {
+		col.IsAutoIncrement = true
+	}
 
 	// name first token(s) before type
 	tokens := strings.Fields(line)
@@ -324,7 +328,20 @@ func parseColumnLine(line string) parsedColumn {
 	if col.DataType == "" {
 		col.DataType = "TEXT"
 	}
+	if isSerialDataType(col.DataType) {
+		col.IsAutoIncrement = true
+	}
 	return col
+}
+
+func isSerialDataType(dt string) bool {
+	u := strings.ToUpper(strings.TrimSpace(dt))
+	switch u {
+	case "SERIAL", "BIGSERIAL", "SMALLSERIAL":
+		return true
+	default:
+		return false
+	}
 }
 
 func cleanIdent(s string) string {

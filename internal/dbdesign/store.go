@@ -188,12 +188,13 @@ func (s *Store) CreateTable(projectID uint, name string, posX, posY float64) (*T
 	}
 	// default PK id column
 	col := &Column{
-		TableID:      t.ID,
-		Name:         "id",
-		DataType:     defaultPKType(proj.Dialect),
-		IsPrimaryKey: true,
-		IsNullable:   false,
-		SortOrder:    0,
+		TableID:         t.ID,
+		Name:            "id",
+		DataType:        defaultPKType(proj.Dialect),
+		IsPrimaryKey:    true,
+		IsAutoIncrement: true,
+		IsNullable:      false,
+		SortOrder:       0,
 	}
 	if err := s.db.Create(col).Error; err != nil {
 		return nil, err
@@ -254,14 +255,15 @@ func (s *Store) DeleteTable(id uint) error {
 // --- Columns ---
 
 type ColumnPayload struct {
-	Name         string `json:"name"`
-	DataType     string `json:"data_type"`
-	IsPrimaryKey bool   `json:"is_primary_key"`
-	IsForeignKey bool   `json:"is_foreign_key"`
-	IsNullable   bool   `json:"is_nullable"`
-	IsUnique     bool   `json:"is_unique"`
-	DefaultValue string `json:"default_value"`
-	SortOrder    int    `json:"sort_order"`
+	Name            string `json:"name"`
+	DataType        string `json:"data_type"`
+	IsPrimaryKey    bool   `json:"is_primary_key"`
+	IsForeignKey    bool   `json:"is_foreign_key"`
+	IsAutoIncrement bool   `json:"is_auto_increment"`
+	IsNullable      bool   `json:"is_nullable"`
+	IsUnique        bool   `json:"is_unique"`
+	DefaultValue    string `json:"default_value"`
+	SortOrder       int    `json:"sort_order"`
 }
 
 func (s *Store) CreateColumn(tableID uint, p ColumnPayload) (*Column, error) {
@@ -286,16 +288,21 @@ func (s *Store) CreateColumn(tableID uint, p ColumnPayload) (*Column, error) {
 		s.db.Model(&Column{}).Where("table_id = ? AND is_primary_key = ?", tableID, true).
 			Update("is_primary_key", false)
 	}
+	if p.IsAutoIncrement {
+		s.db.Model(&Column{}).Where("table_id = ? AND is_auto_increment = ?", tableID, true).
+			Update("is_auto_increment", false)
+	}
 	c := &Column{
-		TableID:      tableID,
-		Name:         name,
-		DataType:     dt,
-		IsPrimaryKey: p.IsPrimaryKey,
-		IsForeignKey: p.IsForeignKey,
-		IsNullable:   p.IsNullable,
-		IsUnique:     p.IsUnique,
-		DefaultValue: defVal,
-		SortOrder:    p.SortOrder,
+		TableID:         tableID,
+		Name:            name,
+		DataType:        dt,
+		IsPrimaryKey:    p.IsPrimaryKey,
+		IsForeignKey:    p.IsForeignKey,
+		IsAutoIncrement: p.IsAutoIncrement,
+		IsNullable:      p.IsNullable,
+		IsUnique:        p.IsUnique,
+		DefaultValue:    defVal,
+		SortOrder:       p.SortOrder,
 	}
 	if err := s.db.Create(c).Error; err != nil {
 		return nil, err
@@ -325,10 +332,15 @@ func (s *Store) UpdateColumn(id uint, p ColumnPayload) (*Column, error) {
 		s.db.Model(&Column{}).Where("table_id = ? AND is_primary_key = ? AND id <> ?", c.TableID, true, id).
 			Update("is_primary_key", false)
 	}
+	if p.IsAutoIncrement {
+		s.db.Model(&Column{}).Where("table_id = ? AND is_auto_increment = ? AND id <> ?", c.TableID, true, id).
+			Update("is_auto_increment", false)
+	}
 	c.Name = name
 	c.DataType = dt
 	c.IsPrimaryKey = p.IsPrimaryKey
 	c.IsForeignKey = p.IsForeignKey
+	c.IsAutoIncrement = p.IsAutoIncrement
 	c.IsNullable = p.IsNullable
 	c.IsUnique = p.IsUnique
 	c.DefaultValue = defVal
@@ -535,20 +547,21 @@ func (s *Store) ImportSQL(projectID uint, sql string, replace bool) (*ImportResu
 			if !hasPK && len(pt.Columns) == 0 {
 				proj, _ := st.GetProject(projectID)
 				pt.Columns = append(pt.Columns, parsedColumn{
-					Name: "id", DataType: defaultPKType(proj.Dialect), IsPrimaryKey: true,
+					Name: "id", DataType: defaultPKType(proj.Dialect), IsPrimaryKey: true, IsAutoIncrement: true,
 				})
 			}
 
 			for si, pc := range pt.Columns {
 				c := &Column{
-					TableID:      t.ID,
-					Name:         pc.Name,
-					DataType:     pc.DataType,
-					IsPrimaryKey: pc.IsPrimaryKey,
-					IsNullable:   pc.IsNullable,
-					IsUnique:     pc.IsUnique,
-					DefaultValue: pc.DefaultValue,
-					SortOrder:    si,
+					TableID:         t.ID,
+					Name:            pc.Name,
+					DataType:        pc.DataType,
+					IsPrimaryKey:    pc.IsPrimaryKey,
+					IsAutoIncrement: pc.IsAutoIncrement,
+					IsNullable:      pc.IsNullable,
+					IsUnique:        pc.IsUnique,
+					DefaultValue:    pc.DefaultValue,
+					SortOrder:       si,
 				}
 				if err := tx.Create(c).Error; err != nil {
 					return err
