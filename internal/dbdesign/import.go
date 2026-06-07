@@ -57,6 +57,9 @@ var (
 	reCreateTableMissingName = regexp.MustCompile(`(?is)^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?\s*\(`)
 	reCreatePgEnum           = regexp.MustCompile(`(?is)CREATE\s+TYPE\s+(?:IF\s+NOT\s+EXISTS\s+)?[` + "`\"" + `]?([a-zA-Z_][a-zA-Z0-9_]*)[` + "`\"" + `]?\s+AS\s+ENUM\s*\(([^)]*)\)`)
 	reDesignerFKComment      = regexp.MustCompile(`(?i)--\s*FK:\s*(?P<name>\S+)\s*\((?P<actions>[^)]*)\)\s*(?P<fromtable>[a-zA-Z0-9_]+)\.(?P<fromcol>[a-zA-Z0-9_]+)\s*->\s*(?P<totable>[a-zA-Z0-9_]+)\.(?P<tocol>[a-zA-Z0-9_]+)`)
+	reTypeLengthDigits       = regexp.MustCompile(`^\d+$`)
+	reDecimalPrecision       = regexp.MustCompile(`^\d+\s*(,\s*\d+)?$`)
+	reGenericTypeParams      = regexp.MustCompile(`^[\d\s,]+$`)
 )
 
 // SQLParseError describes a DDL parse failure with optional source location.
@@ -369,6 +372,74 @@ func normalizeImportedDataType(dataType string) string {
 	}
 }
 
+func validateColumnDataType(dataType string) error {
+	dt := strings.TrimSpace(dataType)
+	if dt == "" {
+		return fmt.Errorf("type is required")
+	}
+	if strings.Count(dt, "(") != strings.Count(dt, ")") {
+		return fmt.Errorf("unbalanced parentheses in %q", dt)
+	}
+
+	upper := strings.ToUpper(dt)
+	switch {
+	case strings.HasPrefix(upper, "ENUM("):
+		if len(parseEnumValuesFromDataType(dt)) == 0 {
+			return fmt.Errorf("ENUM requires at least one value")
+		}
+		return nil
+	case strings.HasPrefix(upper, "SET("):
+		if len(parseEnumValuesFromDataType(dt)) == 0 {
+			return fmt.Errorf("SET requires at least one value")
+		}
+		return nil
+	case strings.HasPrefix(upper, "DOUBLE PRECISION"):
+		return validateTypeParameters("DOUBLE PRECISION", typeParameterInner(dt))
+	}
+
+	base, suffix := splitTypeBaseSuffix(dt)
+	if suffix == "" {
+		return nil
+	}
+	return validateTypeParameters(base, typeParameterInner(dt))
+}
+
+func typeParameterInner(dataType string) string {
+	start := strings.Index(dataType, "(")
+	end := strings.LastIndex(dataType, ")")
+	if start < 0 || end <= start {
+		return ""
+	}
+	return strings.TrimSpace(dataType[start+1 : end])
+}
+
+func validateTypeParameters(base, inner string) error {
+	if inner == "" {
+		return fmt.Errorf("empty type parameter in %q", base)
+	}
+	baseUpper := strings.ToUpper(strings.TrimSpace(base))
+	switch baseUpper {
+	case "VARCHAR", "CHAR", "VARBINARY", "BINARY", "BIT",
+		"INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT":
+		if !reTypeLengthDigits.MatchString(inner) {
+			return fmt.Errorf("length must be a positive integer")
+		}
+	case "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE":
+		if !reDecimalPrecision.MatchString(inner) {
+			return fmt.Errorf("precision must use digits, e.g. 10 or 10,2")
+		}
+	case "DOUBLE PRECISION":
+		if !reDecimalPrecision.MatchString(inner) && !reTypeLengthDigits.MatchString(inner) {
+			return fmt.Errorf("precision must use digits, e.g. 10 or 10,2")
+		}
+	default:
+		if !reGenericTypeParams.MatchString(inner) {
+			return fmt.Errorf("type parameter must contain only digits and commas")
+		}
+	}
+	return nil
+}
+
 func parseColumnBlock(block string, tableName string, pgEnums map[string][]string) ([]parsedColumn, []parsedForeignKey, []parsedIndex, error) {
 	var cols []parsedColumn
 	var fks []parsedForeignKey
@@ -415,6 +486,13 @@ func parseColumnBlock(block string, tableName string, pgEnums map[string][]strin
 
 		col := parseColumnLine(part)
 		if col.Name != "" {
+			if err := validateColumnDataType(col.DataType); err != nil {
+				firstLine := strings.TrimSpace(strings.Split(part, "\n")[0])
+				return nil, nil, nil, &SQLParseError{
+					Message: fmt.Sprintf("invalid column type for %q in table %q: %s", col.Name, tableName, err.Error()),
+					Snippet: firstLine,
+				}
+			}
 			col.DataType = resolveImportedColumnType(col.DataType, tableName, col.Name, pgEnums)
 			key := strings.ToLower(col.Name)
 			if _, dup := seenCols[key]; dup {

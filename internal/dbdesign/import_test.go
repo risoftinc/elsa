@@ -231,6 +231,32 @@ func TestValidateSQL_duplicateColumnName(t *testing.T) {
 	}
 }
 
+func TestValidateSQL_invalidVarcharLength(t *testing.T) {
+	sql := "CREATE TABLE certificates (\n  `certificate_no` VARCHAR(10ddd0) NOT NULL\n);"
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for invalid VARCHAR length")
+	}
+	if !strings.Contains(err.Error(), "invalid column type") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateSQL_validVarcharLength(t *testing.T) {
+	sql := "CREATE TABLE certificates (\n  `certificate_no` VARCHAR(100) NOT NULL\n);"
+	if err := ValidateSQL(sql); err != nil {
+		t.Fatalf("expected valid sql: %v", err)
+	}
+}
+
+func TestValidateSQL_invalidDecimalPrecision(t *testing.T) {
+	sql := "CREATE TABLE items (price DECIMAL(10,xx) NOT NULL);"
+	err := ValidateSQL(sql)
+	if err == nil {
+		t.Fatal("expected error for invalid DECIMAL precision")
+	}
+}
+
 func TestParseSQL_sqliteDesignerFKComment(t *testing.T) {
 	sql := `CREATE TABLE roles (
   id INTEGER PRIMARY KEY
